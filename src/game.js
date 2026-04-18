@@ -36,6 +36,16 @@ import {
   getCurrentChallengeSeed,
   fetchChallengeLeaderboard
 } from './challenges.js';
+import {
+  multiplayerEnabled,
+  onMultiplayerChange,
+  onGameStart,
+  createRoom,
+  joinRoomByCode,
+  leaveRoom,
+  sendSetReady,
+  sendStart
+} from './multiplayer.js';
 
 
 // ============================================================
@@ -4452,6 +4462,129 @@ document.getElementById('abandonBtn').onclick = () => {
   if (lbScopeG) lbScopeG.onclick = () => { leaderboardScope = 'global'; loadLeaderboard(); };
   if (lbScopeF) lbScopeF.onclick = () => { leaderboardScope = 'friends'; loadLeaderboard(); };
   if (lbScopeC) lbScopeC.onclick = () => { leaderboardScope = 'challenge'; loadLeaderboard(); };
+
+  // ----------------------------------------------------------
+  // MULTIPLAYER LOBBY WIRING (Phase 8a)
+  // ----------------------------------------------------------
+  const mpScreen = document.getElementById('multiplayerScreen');
+  const mpLobbyView = document.getElementById('mpLobbyView');
+  const mpRoomView = document.getElementById('mpRoomView');
+  const mpJoinInput = document.getElementById('mpJoinCodeInput');
+  const mpLobbyMsg = document.getElementById('mpLobbyMessage');
+  const mpCreateBtn = document.getElementById('mpCreateBtn');
+  const mpJoinBtn = document.getElementById('mpJoinBtn');
+  const mpRoomCode = document.getElementById('mpRoomCode');
+  const mpPlayerList = document.getElementById('mpPlayerList');
+  const mpReadyBtn = document.getElementById('mpReadyBtn');
+  const mpStartBtn = document.getElementById('mpStartBtn');
+  const mpLeaveBtn = document.getElementById('mpLeaveBtn');
+  const mpCloseBtn = document.getElementById('mpCloseBtn');
+  const mpBtn = document.getElementById('multiplayerBtn');
+
+  function showMpLobbyMessage(text, kind) {
+    if (!mpLobbyMsg) return;
+    mpLobbyMsg.textContent = text || '';
+    mpLobbyMsg.style.color = kind === 'error' ? 'var(--red, #ff4d6d)'
+      : kind === 'success' ? 'var(--cyan)'
+      : '';
+  }
+
+  function renderMpState(state) {
+    if (!mpScreen) return;
+    if (state.inRoom) {
+      mpLobbyView.classList.add('hidden');
+      mpRoomView.classList.remove('hidden');
+      mpRoomCode.textContent = state.code || '------';
+      mpPlayerList.innerHTML = state.players.map((p) => `
+        <div style="display: flex; justify-content: space-between; padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.05);">
+          <span style="color: ${p.isMe ? 'var(--cyan)' : 'var(--text)'};">${escapeHtml(p.name)} ${p.isHost ? '<span style="color: var(--yellow);">[host]</span>' : ''} ${p.isMe ? '<span class="dim">(you)</span>' : ''}</span>
+          <span style="color: ${p.ready ? '#39ff14' : 'var(--dim)'};">${p.ready ? 'READY' : 'not ready'}</span>
+        </div>
+      `).join('');
+      // My ready state
+      const me = state.players.find((p) => p.isMe);
+      if (me) {
+        mpReadyBtn.textContent = me.ready ? 'Unready' : 'Ready Up';
+      }
+      const allReady = state.players.length > 0 && state.players.every((p) => p.ready);
+      if (state.isHost) {
+        mpStartBtn.classList.remove('hidden');
+        mpStartBtn.disabled = !allReady;
+        mpStartBtn.style.opacity = allReady ? '1' : '0.5';
+      } else {
+        mpStartBtn.classList.add('hidden');
+      }
+    } else {
+      mpLobbyView.classList.remove('hidden');
+      mpRoomView.classList.add('hidden');
+    }
+  }
+
+  if (mpBtn) {
+    mpBtn.onclick = () => {
+      if (!multiplayerEnabled) {
+        alert('Multiplayer server not configured (VITE_COLYSEUS_URL missing).');
+        return;
+      }
+      hideAll();
+      mpScreen.classList.remove('hidden');
+      showMpLobbyMessage('');
+      if (mpJoinInput) mpJoinInput.value = '';
+    };
+  }
+  if (mpCloseBtn) {
+    mpCloseBtn.onclick = () => {
+      hideAll();
+      document.getElementById('titleScreen').classList.remove('hidden');
+    };
+  }
+  if (mpCreateBtn) {
+    mpCreateBtn.onclick = async () => {
+      mpCreateBtn.disabled = true;
+      showMpLobbyMessage('Creating room...', '');
+      const name = (getProfile()?.display_name) || (typeof getDisplayName === 'function' ? getDisplayName() : '') || 'Pilot';
+      const { error } = await createRoom(name);
+      mpCreateBtn.disabled = false;
+      if (error) showMpLobbyMessage(error.message || 'Create failed', 'error');
+    };
+  }
+  if (mpJoinBtn) {
+    mpJoinBtn.onclick = async () => {
+      const code = (mpJoinInput?.value || '').trim().toUpperCase();
+      mpJoinBtn.disabled = true;
+      showMpLobbyMessage('Joining...', '');
+      const name = (getProfile()?.display_name) || (typeof getDisplayName === 'function' ? getDisplayName() : '') || 'Pilot';
+      const { error } = await joinRoomByCode(code, name);
+      mpJoinBtn.disabled = false;
+      if (error) showMpLobbyMessage(error.message || 'Join failed', 'error');
+    };
+  }
+  if (mpJoinInput) {
+    mpJoinInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') mpJoinBtn?.click();
+    });
+  }
+  if (mpReadyBtn) {
+    mpReadyBtn.onclick = () => {
+      const isReady = mpReadyBtn.textContent.trim() === 'Unready';
+      sendSetReady(!isReady);
+    };
+  }
+  if (mpStartBtn) {
+    mpStartBtn.onclick = () => sendStart();
+  }
+  if (mpLeaveBtn) {
+    mpLeaveBtn.onclick = async () => {
+      await leaveRoom();
+    };
+  }
+
+  onMultiplayerChange(renderMpState);
+  onGameStart(({ seed }) => {
+    // Server picked the seed; run on every client with same seed.
+    hideAll();
+    newRun({ seed });
+  });
 
   // Weekly challenge banner + button on title screen
   const challengeInfo = document.getElementById('weeklyChallengeInfo');

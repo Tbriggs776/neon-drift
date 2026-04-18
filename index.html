@@ -110,6 +110,7 @@
       <button class="btn" id="startBtn">Launch Run</button>
       <button class="btn secondary" id="leaderboardBtn">Leaderboard</button>
       <button class="btn secondary" id="friendsBtn">Friends</button>
+      <button class="btn secondary" id="multiplayerBtn">Multiplayer</button>
       <button class="btn secondary hidden" id="profileBtn">Profile</button>
       <button class="btn secondary" id="metaBtn">Hangar</button>
       <button class="btn secondary" id="resetBtn">Reset</button>
@@ -226,6 +227,48 @@
 
     <div class="btn-row">
       <button class="btn secondary" id="closeFriendsBtn">Back</button>
+    </div>
+  </div>
+</div>
+
+<!-- Multiplayer lobby screen -->
+<div id="multiplayerScreen" class="overlay hidden">
+  <div class="card" style="max-width: 560px;">
+    <h1 style="font-size: 38px;">MULTIPLAYER</h1>
+
+    <!-- View 1: not in a room yet -->
+    <div id="mpLobbyView">
+      <h2>Create or join a room</h2>
+      <p class="dim">Up to 4 pilots. Share your code with friends to play on the same seed together.</p>
+      <div style="display: flex; flex-direction: column; gap: 10px; margin: 16px 0;">
+        <button class="btn" id="mpCreateBtn">Create Room</button>
+        <div style="display: flex; gap: 6px;">
+          <input type="text" id="mpJoinCodeInput" maxlength="6" placeholder="room code (6 chars)" style="flex: 1; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 10px 12px; font-size: 14px; letter-spacing: 4px; text-align: center; text-transform: uppercase; outline: none;">
+          <button class="btn secondary" id="mpJoinBtn" style="padding: 0 16px;">Join</button>
+        </div>
+        <div id="mpLobbyMessage" class="dim" style="text-align: center; font-size: 12px; min-height: 18px;"></div>
+      </div>
+    </div>
+
+    <!-- View 2: inside a room -->
+    <div id="mpRoomView" class="hidden">
+      <div style="text-align: center; margin: 12px 0;">
+        <div class="dim" style="font-size: 11px; letter-spacing: 2px;">ROOM CODE</div>
+        <div id="mpRoomCode" style="font-size: 38px; color: var(--pink); letter-spacing: 6px; font-weight: bold; margin: 4px 0;">------</div>
+        <div class="dim" style="font-size: 11px;">Share this code with friends</div>
+      </div>
+      <div class="divider"></div>
+      <div class="dim" style="font-size: 11px; letter-spacing: 2px; margin: 10px 0 6px;">PILOTS</div>
+      <div id="mpPlayerList" style="font-family: monospace; font-size: 13px; margin-bottom: 12px;"></div>
+      <div class="btn-row">
+        <button class="btn" id="mpReadyBtn">Ready Up</button>
+        <button class="btn hidden" id="mpStartBtn">Start Game</button>
+        <button class="btn secondary" id="mpLeaveBtn" style="color: var(--red, #ff4d6d); border-color: var(--red, #ff4d6d);">Leave</button>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn secondary" id="mpCloseBtn">Back to Title</button>
     </div>
   </div>
 </div>
