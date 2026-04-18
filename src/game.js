@@ -8,6 +8,23 @@ import {
   setDisplayName,
   isLeaderboardEnabled
 } from './leaderboard.js';
+import {
+  initAuth,
+  onAuthChange,
+  sendMagicLink,
+  signOut,
+  setProfileDisplayName,
+  isSignedIn,
+  getProfile
+} from './auth.js';
+import {
+  searchUsers,
+  sendFriendRequest,
+  acceptFriendRequest,
+  removeFriendship,
+  fetchMyFriendships,
+  fetchFriendsLeaderboard
+} from './friends.js';
 
 
 // ============================================================
@@ -4227,12 +4244,35 @@ document.getElementById('abandonBtn').onclick = () => {
 // LEADERBOARD UI WIRING
 // ============================================================
 (() => {
-  // Display name input - load existing + save on change
+  // Display name input - dual-purpose:
+  //   signed out -> writes to localStorage (anon name)
+  //   signed in  -> writes to profiles.display_name (debounced)
   const nameInput = document.getElementById('displayNameInput');
+  const pilotLabel = document.getElementById('pilotNameLabel');
+  let profileSaveTimer = null;
+  function refreshNameInput() {
+    if (!nameInput) return;
+    if (isSignedIn()) {
+      const p = getProfile();
+      nameInput.value = p?.display_name || '';
+      nameInput.placeholder = 'Pilot name';
+      if (pilotLabel) pilotLabel.textContent = 'PROFILE NAME:';
+    } else {
+      nameInput.value = getDisplayName();
+      nameInput.placeholder = 'Anonymous';
+      if (pilotLabel) pilotLabel.textContent = 'PILOT NAME:';
+    }
+  }
   if (nameInput) {
-    nameInput.value = getDisplayName();
+    refreshNameInput();
     nameInput.addEventListener('input', (e) => {
-      setDisplayName(e.target.value);
+      const v = e.target.value;
+      if (isSignedIn()) {
+        if (profileSaveTimer) clearTimeout(profileSaveTimer);
+        profileSaveTimer = setTimeout(() => setProfileDisplayName(v), 400);
+      } else {
+        setDisplayName(v);
+      }
     });
   }
 
@@ -4255,46 +4295,73 @@ document.getElementById('abandonBtn').onclick = () => {
   }
   refreshGlobalStats();
 
-  // Leaderboard button
+  // Leaderboard button + scope toggle (Global / Friends)
+  let leaderboardScope = 'global';
+  function renderLeaderboardRows(rows, list, scope) {
+    if (!rows || rows.length === 0) {
+      const empty = scope === 'friends'
+        ? 'No friend scores yet — invite some pilots!'
+        : 'No scores yet — be the first!';
+      list.innerHTML = `<div class="dim" style="text-align: center; padding: 40px 0;">${empty}</div>`;
+      return;
+    }
+    list.innerHTML = rows.map((r, i) => {
+      const rank = (i + 1).toString().padStart(2, '0');
+      const name = (r.display_name || 'anon').substring(0, 18);
+      const nameCol = r.display_name ? 'var(--cyan)' : 'var(--dim)';
+      return `
+        <div style="display: grid; grid-template-columns: 30px 1fr 70px 50px; gap: 10px; padding: 6px 4px; border-bottom: 1px solid rgba(255,255,255,0.05);">
+          <span style="color: var(--yellow); font-weight: bold;">#${rank}</span>
+          <span style="color: ${nameCol};">${escapeHtml(name)}</span>
+          <span style="color: var(--yellow); text-align: right;">${r.score.toLocaleString()}</span>
+          <span style="color: var(--pink); text-align: right;">W${r.wave}</span>
+        </div>
+      `;
+    }).join('');
+  }
+  function paintScopeButtons() {
+    const g = document.getElementById('lbScopeGlobal');
+    const f = document.getElementById('lbScopeFriends');
+    if (!g || !f) return;
+    const base = 'padding: 4px 14px; font-size: 11px;';
+    const active = ' border-color: var(--pink); color: var(--pink);';
+    g.style.cssText = base + (leaderboardScope === 'global' ? active : '');
+    f.style.cssText = base + (leaderboardScope === 'friends' ? active : '');
+  }
+  async function loadLeaderboard() {
+    const list = document.getElementById('leaderboardList');
+    const myBestLine = document.getElementById('myBestLine');
+    if (!list) return;
+    paintScopeButtons();
+    list.innerHTML = '<div class="dim" style="text-align: center; padding: 40px 0;">Loading...</div>';
+    myBestLine.textContent = '';
+    if (!isLeaderboardEnabled()) {
+      list.innerHTML = '<div class="dim" style="text-align: center; padding: 40px 0;">Leaderboard unavailable (offline mode)</div>';
+      return;
+    }
+    if (leaderboardScope === 'friends' && !isSignedIn()) {
+      list.innerHTML = '<div class="dim" style="text-align: center; padding: 40px 0;">Sign in to see your friends-only leaderboard.</div>';
+      return;
+    }
+    const fetcher = leaderboardScope === 'friends' ? fetchFriendsLeaderboard : fetchLeaderboard;
+    const [rows, myBest] = await Promise.all([fetcher(20), fetchMyBest()]);
+    if (myBest) {
+      myBestLine.textContent = `Your best: Wave ${myBest.wave} · Score ${myBest.score.toLocaleString()}`;
+    }
+    renderLeaderboardRows(rows, list, leaderboardScope);
+  }
   const lbBtn = document.getElementById('leaderboardBtn');
   if (lbBtn) {
     lbBtn.onclick = () => {
       hideAll();
       document.getElementById('leaderboardScreen').classList.remove('hidden');
-      const list = document.getElementById('leaderboardList');
-      const myBestLine = document.getElementById('myBestLine');
-      list.innerHTML = '<div class="dim" style="text-align: center; padding: 40px 0;">Loading...</div>';
-      myBestLine.textContent = '';
-
-      if (!isLeaderboardEnabled()) {
-        list.innerHTML = '<div class="dim" style="text-align: center; padding: 40px 0;">Leaderboard unavailable (offline mode)</div>';
-        return;
-      }
-
-      Promise.all([fetchLeaderboard(20), fetchMyBest()]).then(([rows, myBest]) => {
-        if (myBest) {
-          myBestLine.textContent = `Your best: Wave ${myBest.wave} · Score ${myBest.score.toLocaleString()}`;
-        }
-        if (!rows || rows.length === 0) {
-          list.innerHTML = '<div class="dim" style="text-align: center; padding: 40px 0;">No scores yet — be the first!</div>';
-          return;
-        }
-        list.innerHTML = rows.map((r, i) => {
-          const rank = (i + 1).toString().padStart(2, '0');
-          const name = (r.display_name || 'anon').substring(0, 18);
-          const nameCol = r.display_name ? 'var(--cyan)' : 'var(--dim)';
-          return `
-            <div style="display: grid; grid-template-columns: 30px 1fr 70px 50px; gap: 10px; padding: 6px 4px; border-bottom: 1px solid rgba(255,255,255,0.05);">
-              <span style="color: var(--yellow); font-weight: bold;">#${rank}</span>
-              <span style="color: ${nameCol};">${escapeHtml(name)}</span>
-              <span style="color: var(--yellow); text-align: right;">${r.score.toLocaleString()}</span>
-              <span style="color: var(--pink); text-align: right;">W${r.wave}</span>
-            </div>
-          `;
-        }).join('');
-      });
+      loadLeaderboard();
     };
   }
+  const lbScopeG = document.getElementById('lbScopeGlobal');
+  const lbScopeF = document.getElementById('lbScopeFriends');
+  if (lbScopeG) lbScopeG.onclick = () => { leaderboardScope = 'global'; loadLeaderboard(); };
+  if (lbScopeF) lbScopeF.onclick = () => { leaderboardScope = 'friends'; loadLeaderboard(); };
   document.getElementById('closeLeaderboardBtn').onclick = () => {
     hideAll();
     document.getElementById('titleScreen').classList.remove('hidden');
@@ -4314,4 +4381,216 @@ document.getElementById('abandonBtn').onclick = () => {
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
+
+  // ----------------------------------------------------------
+  // AUTH UI WIRING (sign in / sign out / magic link)
+  // ----------------------------------------------------------
+  const authStatusText = document.getElementById('authStatusText');
+  const authActionBtn = document.getElementById('authActionBtn');
+  const authScreen = document.getElementById('authScreen');
+  const authEmailInput = document.getElementById('authEmailInput');
+  const authMessage = document.getElementById('authMessage');
+  const sendMagicBtn = document.getElementById('sendMagicLinkBtn');
+  const closeAuthBtn = document.getElementById('closeAuthBtn');
+
+  function showAuthMessage(text, kind) {
+    if (!authMessage) return;
+    authMessage.textContent = text || '';
+    authMessage.style.color = kind === 'error' ? 'var(--red, #ff4d6d)'
+      : kind === 'success' ? 'var(--cyan)'
+      : '';
+  }
+
+  function openAuthScreen() {
+    hideAll();
+    authScreen.classList.remove('hidden');
+    showAuthMessage('');
+    if (authEmailInput) {
+      authEmailInput.value = '';
+      setTimeout(() => authEmailInput.focus(), 50);
+    }
+  }
+  function closeAuthScreen() {
+    hideAll();
+    document.getElementById('titleScreen').classList.remove('hidden');
+  }
+
+  if (authActionBtn) {
+    authActionBtn.onclick = async () => {
+      if (!isLeaderboardEnabled()) {
+        showAuthMessage('Leaderboard offline — sign-in unavailable', 'error');
+        return;
+      }
+      if (isSignedIn()) {
+        authActionBtn.disabled = true;
+        await signOut();
+        authActionBtn.disabled = false;
+      } else {
+        openAuthScreen();
+      }
+    };
+  }
+
+  if (sendMagicBtn) {
+    sendMagicBtn.onclick = async () => {
+      const email = authEmailInput?.value || '';
+      sendMagicBtn.disabled = true;
+      showAuthMessage('Sending...', '');
+      const { error } = await sendMagicLink(email);
+      sendMagicBtn.disabled = false;
+      if (error) {
+        showAuthMessage(error.message || 'Send failed', 'error');
+      } else {
+        showAuthMessage(`Link sent to ${email.trim()}. Check your inbox.`, 'success');
+      }
+    };
+  }
+  if (closeAuthBtn) closeAuthBtn.onclick = closeAuthScreen;
+  if (authEmailInput) {
+    authEmailInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && sendMagicBtn) sendMagicBtn.click();
+    });
+  }
+
+  // Reflect auth state in the title-screen UI whenever it changes
+  onAuthChange(({ session, profile }) => {
+    if (!authStatusText || !authActionBtn) return;
+    if (session?.user) {
+      const name = profile?.display_name || session.user.email || 'pilot';
+      authStatusText.textContent = `SIGNED IN: ${name.toUpperCase()}`;
+      authStatusText.classList.remove('dim');
+      authActionBtn.textContent = 'Sign Out';
+      // If we just landed back from a magic-link redirect, return to title.
+      if (!authScreen.classList.contains('hidden')) closeAuthScreen();
+    } else {
+      authStatusText.textContent = 'NOT SIGNED IN';
+      authStatusText.classList.add('dim');
+      authActionBtn.textContent = 'Sign In';
+    }
+    refreshNameInput();
+  });
+
+  // ----------------------------------------------------------
+  // FRIENDS UI WIRING
+  // ----------------------------------------------------------
+  const friendsScreen = document.getElementById('friendsScreen');
+  const friendsAuthGate = document.getElementById('friendsAuthGate');
+  const friendsBody = document.getElementById('friendsBody');
+  const friendSearchInput = document.getElementById('friendSearchInput');
+  const friendSearchBtn = document.getElementById('friendSearchBtn');
+  const friendSearchResults = document.getElementById('friendSearchResults');
+  const friendsListsEl = document.getElementById('friendsLists');
+  const friendsBtn = document.getElementById('friendsBtn');
+  const closeFriendsBtn = document.getElementById('closeFriendsBtn');
+
+  function renderFriendsLists({ incoming, outgoing, friends }) {
+    if (!friendsListsEl) return;
+    if (incoming.length === 0 && outgoing.length === 0 && friends.length === 0) {
+      friendsListsEl.innerHTML = '<div class="dim" style="text-align: center; padding: 30px 0;">No friends or pending requests yet. Search above to find pilots.</div>';
+      return;
+    }
+    const btn = (label, id, kind) => `<button class="btn secondary" style="padding: 2px 8px; font-size: 10px;${kind === 'danger' ? ' color: var(--red, #ff4d6d); border-color: var(--red, #ff4d6d);' : ''}" data-fr-action="${id}">${label}</button>`;
+    const row = (name, actions) => `
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 6px 4px; border-bottom: 1px solid rgba(255,255,255,0.05);">
+        <span style="color: var(--cyan);">${escapeHtml(name)}</span>
+        <span style="display: flex; gap: 4px;">${actions}</span>
+      </div>`;
+    const section = (title, items, renderItem) => items.length === 0 ? '' : `
+      <div style="margin-top: 14px;">
+        <div class="dim" style="font-size: 11px; letter-spacing: 1px; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.08);">${title} (${items.length})</div>
+        ${items.map(renderItem).join('')}
+      </div>`;
+    friendsListsEl.innerHTML = [
+      section('INCOMING REQUESTS', incoming, f => row(f.displayName, btn('Accept', `accept:${f.id}`) + btn('Decline', `remove:${f.id}`, 'danger'))),
+      section('FRIENDS', friends, f => row(f.displayName, btn('Unfriend', `remove:${f.id}`, 'danger'))),
+      section('SENT (PENDING)', outgoing, f => row(f.displayName, btn('Cancel', `remove:${f.id}`, 'danger')))
+    ].join('');
+  }
+
+  async function refreshFriends() {
+    if (!friendsListsEl) return;
+    if (!isSignedIn()) {
+      friendsAuthGate?.classList.remove('hidden');
+      friendsBody?.classList.add('hidden');
+      return;
+    }
+    friendsAuthGate?.classList.add('hidden');
+    friendsBody?.classList.remove('hidden');
+    friendsListsEl.innerHTML = '<div class="dim" style="text-align: center; padding: 20px 0;">Loading...</div>';
+    const data = await fetchMyFriendships();
+    renderFriendsLists(data);
+  }
+
+  async function runFriendSearch() {
+    if (!friendSearchResults || !friendSearchInput) return;
+    const q = friendSearchInput.value;
+    if (q.trim().length < 2) {
+      friendSearchResults.innerHTML = '<div class="dim" style="padding: 6px 0;">Type at least 2 characters.</div>';
+      return;
+    }
+    friendSearchResults.innerHTML = '<div class="dim" style="padding: 6px 0;">Searching...</div>';
+    const results = await searchUsers(q);
+    if (results.length === 0) {
+      friendSearchResults.innerHTML = '<div class="dim" style="padding: 6px 0;">No pilots found.</div>';
+      return;
+    }
+    friendSearchResults.innerHTML = results.map(p => `
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.05);">
+        <span style="color: var(--cyan);">${escapeHtml(p.display_name || '(unnamed)')}</span>
+        <button class="btn secondary" style="padding: 2px 8px; font-size: 10px;" data-fr-action="request:${p.id}">Send Request</button>
+      </div>`).join('');
+  }
+
+  if (friendsBtn) {
+    friendsBtn.onclick = () => {
+      if (!isLeaderboardEnabled()) return;
+      hideAll();
+      friendsScreen.classList.remove('hidden');
+      if (friendSearchInput) friendSearchInput.value = '';
+      if (friendSearchResults) friendSearchResults.innerHTML = '';
+      refreshFriends();
+    };
+  }
+  if (closeFriendsBtn) {
+    closeFriendsBtn.onclick = () => {
+      hideAll();
+      document.getElementById('titleScreen').classList.remove('hidden');
+    };
+  }
+  if (friendSearchBtn) friendSearchBtn.onclick = runFriendSearch;
+  if (friendSearchInput) {
+    friendSearchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') runFriendSearch();
+    });
+  }
+
+  // Event delegation for Accept / Decline / Unfriend / Cancel / Send Request buttons
+  if (friendsScreen) {
+    friendsScreen.addEventListener('click', async (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLElement)) return;
+      const action = t.getAttribute('data-fr-action');
+      if (!action) return;
+      const [op, id] = action.split(':');
+      t.disabled = true;
+      if (op === 'accept') {
+        await acceptFriendRequest(Number(id));
+        await refreshFriends();
+      } else if (op === 'remove') {
+        await removeFriendship(Number(id));
+        await refreshFriends();
+      } else if (op === 'request') {
+        const { error } = await sendFriendRequest(id);
+        if (error) {
+          t.textContent = error.message?.includes('duplicate') ? 'Already exists' : 'Failed';
+        } else {
+          t.textContent = 'Sent ✓';
+        }
+        await refreshFriends();
+      }
+    });
+  }
+
+  // Kick off auth (loads existing session, parses magic-link redirect hash)
+  initAuth();
 })();

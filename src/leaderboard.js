@@ -1,34 +1,18 @@
 // ============================================================
 // LEADERBOARD / TELEMETRY MODULE
 // ============================================================
-// Handles anonymous score submission, leaderboard fetch, and
-// per-session telemetry (upgrade picks, wave progression).
-// Gracefully degrades: if Supabase is unavailable, the game
-// still plays normally — only network features are skipped.
+// Anonymous-or-authenticated score submission and leaderboard fetch.
+// When signed in, scores are attributed to user_id (and display_name is
+// snapshotted from the profile so renames don't rewrite history).
+// Falls back to anon_id if not signed in. Game still plays offline.
 // ============================================================
 
-import { createClient } from '@supabase/supabase-js';
+import { supabase, online } from './supabaseClient.js';
+import { getSession, getProfile } from './auth.js';
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-let supabase = null;
-let leaderboardEnabled = false;
-
-if (SUPABASE_URL && SUPABASE_ANON_KEY) {
-  try {
-    supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession: false }
-    });
-    leaderboardEnabled = true;
-  } catch (e) {
-    console.warn('Supabase init failed, running offline:', e);
-  }
-}
-
-// ---- Anonymous identity ----
-// Generate once, persist in localStorage. Not auth — just a stable ID
-// so we can track "this player's best score" without requiring sign-up.
+// ---- Anonymous device identity ----
+// Stable per-browser ID. Kept even after sign-in so we can union signed-in
+// scores with this device's earlier anon scores when showing personal bests.
 const ANON_ID_KEY = 'neon_drift_anon_id';
 function getAnonId() {
   let id = localStorage.getItem(ANON_ID_KEY);
@@ -39,7 +23,7 @@ function getAnonId() {
   return id;
 }
 
-// ---- Display name ----
+// ---- Anonymous display name (used when not signed in) ----
 const NAME_KEY = 'neon_drift_display_name';
 export function getDisplayName() {
   return localStorage.getItem(NAME_KEY) || '';
@@ -50,33 +34,37 @@ export function setDisplayName(name) {
   return sanitized;
 }
 
-// ---- Basic plausibility check ----
-// Soft anti-cheat: reject impossible submissions client-side.
-// Real determined cheaters can bypass this; the goal is to filter noise.
+// ---- Plausibility check (mirrors the DB CHECK constraints) ----
 function isPlausibleScore(submission) {
   const { wave, score, bestCombo, cores } = submission;
   if (typeof wave !== 'number' || wave < 1 || wave > 500) return false;
   if (typeof score !== 'number' || score < 0) return false;
   if (typeof bestCombo !== 'number' || bestCombo < 0) return false;
   if (typeof cores !== 'number' || cores < 0) return false;
-  // Score upper bound: unrealistic to get more than ~50k per wave on average
   if (score > wave * 50000) return false;
-  // Combo bound: max multiplier is 5x, cap combo chain length at 10k
   if (bestCombo > 10000) return false;
   return true;
 }
 
-// ---- Submit score at end of run ----
+// ---- Submit run results ----
 export async function submitScore({ wave, score, bestCombo, cores, runDurationMs, upgrades }) {
-  if (!leaderboardEnabled) return { success: false, reason: 'offline' };
-  const submission = { wave, score, bestCombo, cores };
-  if (!isPlausibleScore(submission)) {
+  if (!online) return { success: false, reason: 'offline' };
+  if (!isPlausibleScore({ wave, score, bestCombo, cores })) {
     return { success: false, reason: 'implausible' };
   }
+  const session = getSession();
+  const profile = getProfile();
+  const userId = session?.user?.id || null;
+  // Snapshot the name at submit-time so leaderboard history is stable across renames.
+  const displayName = userId
+    ? (profile?.display_name || null)
+    : (getDisplayName() || null);
+
   try {
     const { error } = await supabase.from('scores').insert({
+      user_id: userId,
       anon_id: getAnonId(),
-      display_name: getDisplayName() || null,
+      display_name: displayName,
       wave,
       score,
       best_combo: bestCombo,
@@ -95,13 +83,13 @@ export async function submitScore({ wave, score, bestCombo, cores, runDurationMs
   }
 }
 
-// ---- Fetch top N scores ----
+// ---- Top N global scores ----
 export async function fetchLeaderboard(limit = 20) {
-  if (!leaderboardEnabled) return [];
+  if (!online) return [];
   try {
     const { data, error } = await supabase
       .from('scores')
-      .select('display_name, wave, score, best_combo, created_at')
+      .select('display_name, wave, score, best_combo, created_at, user_id')
       .order('score', { ascending: false })
       .limit(limit);
     if (error) {
@@ -115,16 +103,25 @@ export async function fetchLeaderboard(limit = 20) {
   }
 }
 
-// ---- Fetch this player's best ----
+// ---- Personal best ----
+// Signed-in: union of scores attributed to user_id OR to this device's anon_id
+// (so pre-signin runs still count). Anon: just this device.
 export async function fetchMyBest() {
-  if (!leaderboardEnabled) return null;
+  if (!online) return null;
+  const userId = getSession()?.user?.id;
+  const anonId = getAnonId();
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from('scores')
       .select('wave, score, best_combo')
-      .eq('anon_id', getAnonId())
       .order('score', { ascending: false })
       .limit(1);
+    if (userId) {
+      query = query.or(`user_id.eq.${userId},anon_id.eq.${anonId}`);
+    } else {
+      query = query.eq('anon_id', anonId);
+    }
+    const { data, error } = await query;
     if (error || !data || data.length === 0) return null;
     return data[0];
   } catch (e) {
@@ -132,9 +129,9 @@ export async function fetchMyBest() {
   }
 }
 
-// ---- Global stats (total runs, record wave, etc) ----
+// ---- Global aggregates for title screen ----
 export async function fetchGlobalStats() {
-  if (!leaderboardEnabled) return null;
+  if (!online) return null;
   try {
     const { data, error } = await supabase
       .from('global_stats_view')
@@ -148,5 +145,5 @@ export async function fetchGlobalStats() {
 }
 
 export function isLeaderboardEnabled() {
-  return leaderboardEnabled;
+  return online;
 }

@@ -93,15 +93,37 @@
     <div id="globalStatsBar" class="dim" style="text-align: center; font-size: 11px; letter-spacing: 1px; margin: 8px 0;"></div>
     <div class="divider"></div>
     <p class="dim"><strong style="color: var(--pink)">Controls:</strong> WASD or arrows to move. Mouse to aim, click to fire. Shift to dash through bullets (brief invuln). Every cleared wave offers an upgrade.</p>
-    <div style="margin: 12px 0; display: flex; gap: 8px; align-items: center;">
-      <span class="dim" style="font-size: 11px; letter-spacing: 1px;">PILOT NAME:</span>
+    <div id="authBlock" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 12px 0 6px; font-size: 11px; letter-spacing: 1px;">
+      <span id="authStatusText" class="dim">NOT SIGNED IN</span>
+      <button class="btn secondary" id="authActionBtn" style="padding: 4px 10px; font-size: 11px;">Sign In</button>
+    </div>
+    <div style="margin: 6px 0 12px; display: flex; gap: 8px; align-items: center;">
+      <span class="dim" id="pilotNameLabel" style="font-size: 11px; letter-spacing: 1px;">PILOT NAME:</span>
       <input type="text" id="displayNameInput" maxlength="20" placeholder="Anonymous" style="flex: 1; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 6px 10px; font-size: 13px; letter-spacing: 1px; outline: none;">
     </div>
     <div class="btn-row">
       <button class="btn" id="startBtn">Launch Run</button>
       <button class="btn secondary" id="leaderboardBtn">Leaderboard</button>
+      <button class="btn secondary" id="friendsBtn">Friends</button>
       <button class="btn secondary" id="metaBtn">Hangar</button>
       <button class="btn secondary" id="resetBtn">Reset</button>
+    </div>
+  </div>
+</div>
+
+<!-- Sign-in screen (magic link) -->
+<div id="authScreen" class="overlay hidden">
+  <div class="card" style="max-width: 480px;">
+    <h1 style="font-size: 36px;">SIGN IN</h1>
+    <h2>Magic link to your inbox</h2>
+    <p class="dim">Enter your email and we'll send a one-tap sign-in link. No password required.</p>
+    <div style="margin: 16px 0;">
+      <input type="email" id="authEmailInput" placeholder="you@example.com" autocomplete="email" inputmode="email" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 10px 12px; font-size: 14px; letter-spacing: 1px; outline: none;">
+    </div>
+    <div id="authMessage" class="dim" style="text-align: center; font-size: 12px; min-height: 18px; margin-bottom: 8px;"></div>
+    <div class="btn-row">
+      <button class="btn" id="sendMagicLinkBtn">Send Link</button>
+      <button class="btn secondary" id="closeAuthBtn">Cancel</button>
     </div>
   </div>
 </div>
@@ -112,11 +134,43 @@
     <h1 style="font-size: 40px;">LEADERBOARD</h1>
     <h2>Top pilots across the grid</h2>
     <div id="myBestLine" class="dim" style="text-align: center; font-size: 12px; margin-bottom: 10px;"></div>
+    <div style="display: flex; gap: 6px; justify-content: center; margin-bottom: 10px;">
+      <button class="btn secondary lb-scope-active" id="lbScopeGlobal" style="padding: 4px 14px; font-size: 11px;">Global</button>
+      <button class="btn secondary" id="lbScopeFriends" style="padding: 4px 14px; font-size: 11px;">Friends Only</button>
+    </div>
     <div id="leaderboardList" style="max-height: 420px; overflow-y: auto; font-family: monospace; font-size: 12px;">
       <div class="dim" style="text-align: center; padding: 40px 0;">Loading...</div>
     </div>
     <div class="btn-row">
       <button class="btn secondary" id="closeLeaderboardBtn">Back</button>
+    </div>
+  </div>
+</div>
+
+<!-- Friends screen -->
+<div id="friendsScreen" class="overlay hidden">
+  <div class="card" style="max-width: 560px;">
+    <h1 style="font-size: 40px;">FRIENDS</h1>
+    <h2>Find pilots, send requests, race their bests</h2>
+
+    <div id="friendsAuthGate" class="hidden" style="text-align: center; padding: 30px 0; color: var(--dim, #888);">
+      Sign in to add friends and see who's on top.
+    </div>
+
+    <div id="friendsBody">
+      <div style="display: flex; gap: 6px; margin: 14px 0 8px;">
+        <input type="text" id="friendSearchInput" placeholder="Search pilot by name..." maxlength="30" style="flex: 1; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 8px 12px; font-size: 13px; letter-spacing: 1px; outline: none;">
+        <button class="btn secondary" id="friendSearchBtn" style="padding: 8px 14px;">Search</button>
+      </div>
+      <div id="friendSearchResults" style="font-family: monospace; font-size: 12px; max-height: 120px; overflow-y: auto; margin-bottom: 12px;"></div>
+
+      <div id="friendsLists" style="font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto;">
+        <div class="dim" style="text-align: center; padding: 20px 0;">Loading...</div>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn secondary" id="closeFriendsBtn">Back</button>
     </div>
   </div>
 </div>
