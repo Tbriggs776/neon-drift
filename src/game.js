@@ -11,7 +11,8 @@ import {
 import {
   initAuth,
   onAuthChange,
-  sendMagicLink,
+  signInWithPassword,
+  signUpWithPassword,
   signOut,
   setProfileDisplayName,
   isSignedIn,
@@ -4417,8 +4418,10 @@ document.getElementById('abandonBtn').onclick = () => {
   const authActionBtn = document.getElementById('authActionBtn');
   const authScreen = document.getElementById('authScreen');
   const authEmailInput = document.getElementById('authEmailInput');
+  const authPasswordInput = document.getElementById('authPasswordInput');
   const authMessage = document.getElementById('authMessage');
-  const sendMagicBtn = document.getElementById('sendMagicLinkBtn');
+  const signInBtn = document.getElementById('signInBtn');
+  const signUpBtn = document.getElementById('signUpBtn');
   const closeAuthBtn = document.getElementById('closeAuthBtn');
 
   function showAuthMessage(text, kind) {
@@ -4433,10 +4436,9 @@ document.getElementById('abandonBtn').onclick = () => {
     hideAll();
     authScreen.classList.remove('hidden');
     showAuthMessage('');
-    if (authEmailInput) {
-      authEmailInput.value = '';
-      setTimeout(() => authEmailInput.focus(), 50);
-    }
+    if (authEmailInput) authEmailInput.value = '';
+    if (authPasswordInput) authPasswordInput.value = '';
+    setTimeout(() => authEmailInput?.focus(), 50);
   }
   function closeAuthScreen() {
     hideAll();
@@ -4459,26 +4461,36 @@ document.getElementById('abandonBtn').onclick = () => {
     };
   }
 
-  if (sendMagicBtn) {
-    sendMagicBtn.onclick = async () => {
-      const email = authEmailInput?.value || '';
-      sendMagicBtn.disabled = true;
-      showAuthMessage('Sending...', '');
-      const { error } = await sendMagicLink(email);
-      sendMagicBtn.disabled = false;
-      if (error) {
-        showAuthMessage(error.message || 'Send failed', 'error');
-      } else {
-        showAuthMessage(`Link sent to ${email.trim()}. Check your inbox.`, 'success');
-      }
-    };
+  async function runAuth(mode) {
+    const email = authEmailInput?.value || '';
+    const password = authPasswordInput?.value || '';
+    signInBtn.disabled = true;
+    signUpBtn.disabled = true;
+    showAuthMessage(mode === 'signup' ? 'Creating account...' : 'Signing in...', '');
+    const { error } = mode === 'signup'
+      ? await signUpWithPassword(email, password)
+      : await signInWithPassword(email, password);
+    signInBtn.disabled = false;
+    signUpBtn.disabled = false;
+    if (error) {
+      showAuthMessage(error.message || 'Failed', 'error');
+    } else if (mode === 'signup') {
+      // If email confirmation is enabled in Supabase, no session is returned;
+      // otherwise the auth state listener will close the screen automatically.
+      showAuthMessage('Account created. Signing you in...', 'success');
+    }
+    // Successful sign-in is handled by onAuthChange (closes the screen).
   }
+
+  if (signInBtn) signInBtn.onclick = () => runAuth('signin');
+  if (signUpBtn) signUpBtn.onclick = () => runAuth('signup');
   if (closeAuthBtn) closeAuthBtn.onclick = closeAuthScreen;
-  if (authEmailInput) {
-    authEmailInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && sendMagicBtn) sendMagicBtn.click();
+  [authEmailInput, authPasswordInput].forEach(el => {
+    if (!el) return;
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') runAuth('signin');
     });
-  }
+  });
 
   // Reflect auth state in the title-screen UI whenever it changes
   onAuthChange(({ session, profile }) => {

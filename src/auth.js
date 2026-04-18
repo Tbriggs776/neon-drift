@@ -69,16 +69,30 @@ export async function initAuth() {
   });
 }
 
-export async function sendMagicLink(email) {
-  if (!online) return { error: { message: 'Leaderboard offline' } };
+function validateCreds(email, password) {
   const cleaned = (email || '').trim().toLowerCase();
   if (!cleaned || !cleaned.includes('@') || cleaned.length > 254) {
     return { error: { message: 'Enter a valid email' } };
   }
-  const { error } = await supabase.auth.signInWithOtp({
-    email: cleaned,
-    options: { emailRedirectTo: window.location.origin + window.location.pathname }
-  });
+  if (!password || password.length < 6) {
+    return { error: { message: 'Password must be at least 6 characters' } };
+  }
+  return { email: cleaned, password };
+}
+
+export async function signInWithPassword(email, password) {
+  if (!online) return { error: { message: 'Leaderboard offline' } };
+  const v = validateCreds(email, password);
+  if (v.error) return v;
+  const { error } = await supabase.auth.signInWithPassword({ email: v.email, password: v.password });
+  return { error };
+}
+
+export async function signUpWithPassword(email, password) {
+  if (!online) return { error: { message: 'Leaderboard offline' } };
+  const v = validateCreds(email, password);
+  if (v.error) return v;
+  const { error } = await supabase.auth.signUp({ email: v.email, password: v.password });
   return { error };
 }
 
