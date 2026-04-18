@@ -1070,28 +1070,37 @@ function handleTouchStart(e) {
   }
 }
 function handleTouchMove(e) {
-  e.preventDefault();
+  // Only consume the touch (preventDefault) if it's one of our tracked stick
+  // touches. Calling preventDefault unconditionally cancels iOS Safari's
+  // touchend->click synthesis, breaking every button on the page.
+  let consumed = false;
   for (const t of e.changedTouches) {
     if (t.identifier === touch.leftId) {
       touch.leftX = t.clientX; touch.leftY = t.clientY;
       updateStickVisual('left', true, touch.leftStartX, touch.leftStartY, t.clientX, t.clientY);
+      consumed = true;
     } else if (t.identifier === touch.rightId) {
       touch.rightX = t.clientX; touch.rightY = t.clientY;
       updateStickVisual('right', true, touch.rightStartX, touch.rightStartY, t.clientX, t.clientY);
+      consumed = true;
     }
   }
+  if (consumed) e.preventDefault();
 }
 function handleTouchEnd(e) {
-  e.preventDefault();
+  let consumed = false;
   for (const t of e.changedTouches) {
     if (t.identifier === touch.leftId) {
       touch.leftId = null;
       updateStickVisual('left', false);
+      consumed = true;
     } else if (t.identifier === touch.rightId) {
       touch.rightId = null;
       updateStickVisual('right', false);
+      consumed = true;
     }
   }
+  if (consumed) e.preventDefault();
 }
 document.getElementById('leftZone').addEventListener('touchstart', handleTouchStart, { passive: false });
 document.getElementById('rightZone').addEventListener('touchstart', handleTouchStart, { passive: false });
