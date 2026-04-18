@@ -19,8 +19,10 @@ const gameServer = new Server({
 gameServer.define('neondrift', NeonDriftRoom);
 
 const port = Number(process.env.PORT) || 2567;
-gameServer.listen(port).then(() => {
-  console.log(`[neon-drift-server] listening on :${port}`);
+// Railway (and most cloud hosts) require binding to 0.0.0.0 explicitly
+// so the edge proxy can route traffic to the container.
+gameServer.listen(port, '0.0.0.0').then(() => {
+  console.log(`[neon-drift-server] listening on 0.0.0.0:${port}`);
 }).catch((err) => {
   console.error('[neon-drift-server] failed to start:', err);
   process.exit(1);
