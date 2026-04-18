@@ -44,7 +44,10 @@ import {
   joinRoomByCode,
   leaveRoom,
   sendSetReady,
-  sendStart
+  sendStart,
+  sendPlayerState,
+  getRemotePlayers,
+  isRunInRoom
 } from './multiplayer.js';
 
 
@@ -1444,10 +1447,22 @@ function loop(t) {
     update(dt * run.slowmo);
     // Slowmo recovery
     if (run.slowmo < 1) run.slowmo = Math.min(1, run.slowmo + dt * 0.8);
+    // Broadcast our position to roommates at ~20Hz
+    if (isRunInRoom() && t - lastMpBroadcastAt > 50) {
+      lastMpBroadcastAt = t;
+      sendPlayerState({
+        x: run.player.x,
+        y: run.player.y,
+        angle: run.player.angle,
+        hp: run.player.hp,
+        dead: run.player.hp <= 0
+      });
+    }
   }
   render();
   requestAnimationFrame(loop);
 }
+let lastMpBroadcastAt = 0;
 requestAnimationFrame(loop);
 
 function update(dt) {
@@ -3232,6 +3247,9 @@ function render() {
     ctx.restore();
   }
 
+  // Remote multiplayer pilots (drawn before local player so yours renders on top)
+  drawRemotePlayers();
+
   // Player
   drawPlayer();
 
@@ -3300,6 +3318,48 @@ function drawGrid() {
     ctx.stroke();
   }
   ctx.restore();
+}
+
+// Remote player ship colors (up to 3 other pilots, local player is always pink).
+const REMOTE_COLORS = ['#39ff14', '#ffea00', '#bc8cff'];
+
+function drawRemotePlayers() {
+  const remotes = getRemotePlayers();
+  if (remotes.length === 0) return;
+  let idx = 0;
+  for (const r of remotes) {
+    const color = REMOTE_COLORS[idx % REMOTE_COLORS.length];
+    idx++;
+    if (r.dead || !isFinite(r.x) || !isFinite(r.y)) continue;
+    ctx.save();
+    ctx.translate(r.x, r.y);
+    ctx.rotate(r.angle || 0);
+    // Simple triangular ship outline, no fancy banking or trail — kept cheap
+    // so many remote players don't tank the framerate.
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 14;
+    ctx.strokeStyle = color;
+    ctx.fillStyle = 'rgba(10, 5, 20, 0.6)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(12, 0);
+    ctx.lineTo(-8, -8);
+    ctx.lineTo(-5, 0);
+    ctx.lineTo(-8, 8);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    // Name label floating above
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.font = '11px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = '#000';
+    ctx.shadowBlur = 4;
+    ctx.fillText(r.name || 'pilot', r.x, r.y - 18);
+    ctx.restore();
+  }
 }
 
 function drawPlayer() {

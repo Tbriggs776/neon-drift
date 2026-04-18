@@ -129,3 +129,35 @@ export function sendSetReady(ready) {
 export function sendStart() {
   currentRoom?.send('start');
 }
+
+// Broadcast the local player's state to the room. Called at ~20Hz from the
+// game loop while in a started multiplayer run.
+export function sendPlayerState(payload) {
+  if (!currentRoom || !currentRoom.state?.started) return;
+  currentRoom.send('playerState', payload);
+}
+
+// Snapshot of other players' positions for the renderer to draw.
+// Returns array of { sessionId, name, x, y, angle, hp, dead, isHost }
+export function getRemotePlayers() {
+  if (!currentRoom || !currentRoom.state) return [];
+  const me = currentRoom.sessionId;
+  const out = [];
+  currentRoom.state.players.forEach((p, sid) => {
+    if (sid === me) return;
+    out.push({
+      sessionId: sid,
+      name: p.name,
+      x: p.x, y: p.y,
+      angle: p.angle,
+      hp: p.hp,
+      dead: p.dead,
+      isHost: p.isHost
+    });
+  });
+  return out;
+}
+
+export function isRunInRoom() {
+  return !!(currentRoom && currentRoom.state?.started);
+}

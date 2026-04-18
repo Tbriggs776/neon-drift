@@ -9,11 +9,22 @@ class Player extends Schema {
     this.name = '';
     this.ready = false;
     this.isHost = false;
+    // 8b: live gameplay state broadcast from each client while in a started run.
+    this.x = 0;
+    this.y = 0;
+    this.angle = 0;
+    this.hp = 3;
+    this.dead = false;
   }
 }
 type('string')(Player.prototype, 'name');
 type('boolean')(Player.prototype, 'ready');
 type('boolean')(Player.prototype, 'isHost');
+type('float32')(Player.prototype, 'x');
+type('float32')(Player.prototype, 'y');
+type('float32')(Player.prototype, 'angle');
+type('int16')(Player.prototype, 'hp');
+type('boolean')(Player.prototype, 'dead');
 
 class RoomState extends Schema {
   constructor() {
@@ -57,6 +68,16 @@ class NeonDriftRoom extends Room {
       const p = this.state.players.get(client.sessionId);
       if (!p || this.state.started) return;
       p.ready = !!ready;
+    });
+
+    this.onMessage('playerState', (client, payload) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p || !this.state.started) return;
+      if (typeof payload?.x === 'number') p.x = payload.x;
+      if (typeof payload?.y === 'number') p.y = payload.y;
+      if (typeof payload?.angle === 'number') p.angle = payload.angle;
+      if (typeof payload?.hp === 'number') p.hp = payload.hp | 0;
+      if (typeof payload?.dead === 'boolean') p.dead = payload.dead;
     });
 
     this.onMessage('start', (client) => {
