@@ -124,6 +124,34 @@ function resumeBGM() {
   } catch (e) {}
 }
 
+// iOS Safari requires audio elements to be touched by a user gesture before
+// they can be played programmatically. Prime them on the first interaction.
+let audioUnlocked = false;
+function unlockAudio() {
+  if (audioUnlocked) return;
+  audioUnlocked = true;
+  if (!AUDIO_POOL.shoot) initAudio();
+  const all = [
+    ...AUDIO_POOL.shoot,
+    AUDIO_POOL.explosion,
+    AUDIO_POOL.bosswarn,
+    AUDIO_POOL.bgm
+  ];
+  for (const a of all) {
+    a.muted = true;
+    const p = a.play();
+    if (p && typeof p.then === 'function') {
+      p.then(() => { a.pause(); a.currentTime = 0; a.muted = false; })
+        .catch(() => { a.muted = false; });
+    } else {
+      a.muted = false;
+    }
+  }
+}
+window.addEventListener('touchstart', unlockAudio, { once: true, capture: true });
+window.addEventListener('mousedown', unlockAudio, { once: true, capture: true });
+window.addEventListener('keydown', unlockAudio, { once: true, capture: true });
+
 
 const STORAGE_KEY = 'neon_drift_meta_v1';
 
