@@ -951,12 +951,32 @@ function setInputMode(mode) {
   if (mode === 'gamepad') { ind.textContent = 'GAMEPAD'; ind.classList.add('gamepad'); }
   else if (mode === 'touch') { ind.textContent = 'TOUCH'; ind.classList.add('touch'); }
   else { ind.textContent = 'KEYBOARD+MOUSE'; }
-  // Rebuild controls panel for this mode
   buildControlsPanel(mode);
-  // Show/hide touch UI
   document.getElementById('touchUI').classList.toggle('visible', mode === 'touch');
   document.body.classList.toggle('touch-mode', mode === 'touch');
+  refreshTouchUIVisibility();
 }
+
+// Touch UI must be hidden whenever any modal overlay is open, otherwise its
+// 50vw stick zones at the bottom intercept taps meant for buttons inside
+// the title/leaderboard/friends/etc cards. Handled in JS via MutationObserver
+// instead of CSS :has() so it works on every browser (some iOS versions and
+// embedded webviews don't reliably evaluate :has() the way desktop does).
+function refreshTouchUIVisibility() {
+  const t = document.getElementById('touchUI');
+  if (!t) return;
+  const overlayShown = !!document.querySelector('.overlay:not(.hidden)');
+  const shouldShow = input.mode === 'touch' && !overlayShown;
+  t.style.display = shouldShow ? 'block' : 'none';
+}
+// Watch every .overlay's class attribute for changes (.hidden toggled).
+(() => {
+  const obs = new MutationObserver(refreshTouchUIVisibility);
+  document.querySelectorAll('.overlay').forEach(el => {
+    obs.observe(el, { attributes: true, attributeFilter: ['class'] });
+  });
+  refreshTouchUIVisibility();
+})();
 
 function buildControlsPanel(mode) {
   const body = document.getElementById('panelBody');
