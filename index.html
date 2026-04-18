@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#ff2d95">
+<meta name="description" content="Roguelike synthwave bullet hell. Endless waves, deployable turrets, combat drones, boss fights.">
+<meta property="og:title" content="Neon Drift">
+<meta property="og:description" content="Roguelike synthwave bullet hell. Endless waves, deployable turrets, combat drones, boss fights.">
+<meta property="og:type" content="website">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Neon Drift">
+<title>NEON DRIFT</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+</head>
+<body>
+
+<canvas id="game"></canvas>
+
+<!-- Touch UI (shown on touch devices) -->
+<div id="touchUI">
+  <div class="stick-zone left" id="leftZone">
+    <div class="stick-base" id="leftBase"></div>
+    <div class="stick-knob" id="leftKnob"></div>
+  </div>
+  <div class="stick-zone right" id="rightZone">
+    <div class="stick-base right" id="rightBase"></div>
+    <div class="stick-knob right" id="rightKnob"></div>
+  </div>
+  <button class="touch-btn dash" id="dashBtn">DASH</button>
+  <button class="touch-btn turret" id="turretBtn">⌖</button>
+  <button class="touch-btn medic" id="medicBtn">✚</button>
+  <button class="touch-btn snake" id="snakeBtn">🐍</button>
+  <button class="touch-btn pause" id="pauseBtn">II</button>
+</div>
+
+<div id="inputIndicator">KEYBOARD+MOUSE</div>
+
+<!-- HUD -->
+<div id="hud" class="hidden">
+  <div class="hud-block">
+    <span class="hud-label">HULL</span>
+    <div class="hp-pips" id="hpPips"></div>
+  </div>
+  <div class="hud-block">
+    <span class="hud-label">WAVE</span>
+    <span class="hud-value pink" id="waveText">1</span>
+    <span class="hud-label">SCORE</span>
+    <span class="hud-value yellow" id="scoreText">0</span>
+    <span class="hud-label">CORES</span>
+    <span class="hud-value" id="coresText">0</span>
+  </div>
+  <div class="hud-block">
+    <span class="hud-label">WEAPON</span>
+    <span class="hud-value pink" id="weaponText">PULSE</span>
+  </div>
+</div>
+
+<div id="comboMeter">
+  <div class="combo-num" id="comboNum">0</div>
+  <div class="combo-label">COMBO</div>
+  <div class="combo-mult" id="comboMult">×1.0</div>
+</div>
+
+<div id="waveAnnouncer">
+  <div class="wave-label">WAVE</div>
+  <div class="wave-number" id="waveAnnounceNum">1</div>
+  <div class="wave-name" id="waveAnnounceName">SWARM</div>
+</div>
+
+<div id="toasts"></div>
+
+<div id="controlsPanel" class="hidden">
+  <div class="panel-header" id="panelToggle">
+    <span class="panel-title">CONTROLS</span>
+    <span class="toggle-icon" id="toggleIcon">−</span>
+  </div>
+  <div class="panel-body" id="panelBody">
+    <!-- Rows injected by JS based on input mode -->
+  </div>
+</div>
+
+<!-- Title screen -->
+<div id="titleScreen" class="overlay">
+  <div class="card">
+    <h1>NEON DRIFT</h1>
+    <h2>Roguelike · Bullet Hell · Synthwave</h2>
+    <p>The grid is collapsing. You pilot the last drifter through <strong style="color: var(--cyan)">endless waves of encroaching geometry</strong>. Mini-bosses every 5 waves. The Warden rises every 25. Bank cores between runs to grow stronger.</p>
+    <div class="divider"></div>
+    <div id="globalStatsBar" class="dim" style="text-align: center; font-size: 11px; letter-spacing: 1px; margin: 8px 0;"></div>
+    <div class="divider"></div>
+    <p class="dim"><strong style="color: var(--pink)">Controls:</strong> WASD or arrows to move. Mouse to aim, click to fire. Shift to dash through bullets (brief invuln). Every cleared wave offers an upgrade.</p>
+    <div style="margin: 12px 0; display: flex; gap: 8px; align-items: center;">
+      <span class="dim" style="font-size: 11px; letter-spacing: 1px;">PILOT NAME:</span>
+      <input type="text" id="displayNameInput" maxlength="20" placeholder="Anonymous" style="flex: 1; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 6px 10px; font-size: 13px; letter-spacing: 1px; outline: none;">
+    </div>
+    <div class="btn-row">
+      <button class="btn" id="startBtn">Launch Run</button>
+      <button class="btn secondary" id="leaderboardBtn">Leaderboard</button>
+      <button class="btn secondary" id="metaBtn">Hangar</button>
+      <button class="btn secondary" id="resetBtn">Reset</button>
+    </div>
+  </div>
+</div>
+
+<!-- Leaderboard screen -->
+<div id="leaderboardScreen" class="overlay hidden">
+  <div class="card" style="max-width: 560px;">
+    <h1 style="font-size: 40px;">LEADERBOARD</h1>
+    <h2>Top pilots across the grid</h2>
+    <div id="myBestLine" class="dim" style="text-align: center; font-size: 12px; margin-bottom: 10px;"></div>
+    <div id="leaderboardList" style="max-height: 420px; overflow-y: auto; font-family: monospace; font-size: 12px;">
+      <div class="dim" style="text-align: center; padding: 40px 0;">Loading...</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="closeLeaderboardBtn">Back</button>
+    </div>
+  </div>
+</div>
+
+<!-- Meta upgrade screen -->
+<div id="metaScreen" class="overlay hidden">
+  <div class="card" style="max-width: 620px;">
+    <h1 style="font-size: 42px;">HANGAR</h1>
+    <h2>Permanent upgrades · Spend banked cores</h2>
+    <div style="text-align: center; margin-bottom: 16px;">
+      <span class="dim">Banked: </span>
+      <span class="hud-value yellow" id="metaCoresText" style="font-size: 28px;">0</span>
+      <span class="hud-label">CORES</span>
+    </div>
+    <div class="meta-grid" id="metaGrid"></div>
+    <div class="btn-row">
+      <button class="btn secondary" id="closeMetaBtn">Back</button>
+    </div>
+  </div>
+</div>
+
+<!-- Upgrade screen (between waves) -->
+<div id="upgradeScreen" class="overlay hidden">
+  <div class="card" style="max-width: 780px; padding: 40px 48px;">
+    <h1 style="font-size: 42px;">WAVE CLEAR</h1>
+    <h2 id="upgradeSubtitle">Choose augmentation</h2>
+    <div class="upgrade-grid" id="upgradeGrid"></div>
+    <p class="dim" style="text-align: center; font-size: 12px; margin-top: 16px;">Click an augmentation to apply. Each run's build is unique.</p>
+  </div>
+</div>
+
+<!-- Shop (after boss waves) -->
+<div id="shopScreen" class="overlay hidden">
+  <div class="card" style="max-width: 640px;">
+    <h1 style="font-size: 36px;">BLACK MARKET</h1>
+    <h2 id="shopSubtitle">Boss cleared · Spend cores</h2>
+    <div style="text-align: center; margin-bottom: 14px;">
+      <span class="dim">Cores: </span>
+      <span class="hud-value yellow" id="shopCoresText" style="font-size: 26px;">0</span>
+    </div>
+    <div class="shop-grid" id="shopGrid"></div>
+    <p class="dim" style="text-align: center; font-size: 11px; margin-top: 12px;">Buy as many as you can afford. Advance when ready.</p>
+    <div class="btn-row">
+      <button class="btn" id="leaveShopBtn">Descend to Next Wave →</button>
+    </div>
+  </div>
+</div>
+
+<!-- Death screen -->
+<div id="deathScreen" class="overlay hidden">
+  <div class="card">
+    <h1 style="color: var(--red); background: none; -webkit-text-fill-color: var(--red); text-shadow: 0 0 30px var(--red);">DRIFTED</h1>
+    <h2 id="deathSubtitle">The grid consumed you</h2>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0;">
+      <div style="background: rgba(0,240,255,0.05); border: 1px solid var(--dim); padding: 12px; text-align: center;">
+        <div class="hud-label">Wave</div>
+        <div class="hud-value pink" style="font-size: 28px;" id="dsWave">1</div>
+      </div>
+      <div style="background: rgba(0,240,255,0.05); border: 1px solid var(--dim); padding: 12px; text-align: center;">
+        <div class="hud-label">Score</div>
+        <div class="hud-value yellow" style="font-size: 28px;" id="dsScore">0</div>
+      </div>
+      <div style="background: rgba(0,240,255,0.05); border: 1px solid var(--dim); padding: 12px; text-align: center;">
+        <div class="hud-label">Cores</div>
+        <div class="hud-value" style="font-size: 28px;" id="dsCores">0</div>
+      </div>
+      <div style="background: rgba(0,240,255,0.05); border: 1px solid var(--dim); padding: 12px; text-align: center;">
+        <div class="hud-label">Best Combo</div>
+        <div class="hud-value yellow" style="font-size: 28px;" id="dsCombo">0</div>
+      </div>
+    </div>
+    <p class="dim" style="text-align: center;">Banked <span id="dsBanked" style="color: var(--yellow); font-weight: bold;">0</span> cores for the Hangar.</p>
+    <div class="btn-row">
+      <button class="btn" id="retryBtn">New Run</button>
+      <button class="btn secondary" id="deathMetaBtn">Hangar</button>
+      <button class="btn secondary" id="deathTitleBtn">Title</button>
+    </div>
+  </div>
+</div>
+
+<!-- Pause screen -->
+<div id="pauseScreen" class="overlay hidden">
+  <div class="card">
+    <h1 style="font-size: 40px;">PAUSED</h1>
+    <div class="btn-row">
+      <button class="btn" id="resumeBtn">Resume</button>
+      <button class="btn secondary" id="abandonBtn">Abandon Run</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/src/game.js"></script>
+<script>
+  // Register service worker for offline PWA support
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch((e) => {
+        console.warn('SW registration failed:', e);
+      });
+    });
+  }
+</script>
+</body>
+</html>
