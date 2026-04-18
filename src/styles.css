@@ -21,6 +21,15 @@
   }
   body { display: flex; flex-direction: column; cursor: crosshair; }
 
+  /* Form inputs need to override the body-level user-select:none, otherwise
+     iOS Safari refuses to focus them or accept keyboard input. */
+  input, textarea {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+    touch-action: manipulation;
+  }
+
   /* Canvas stage */
   #game {
     display: block;
