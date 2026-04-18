@@ -101,6 +101,11 @@
       <span class="dim" id="pilotNameLabel" style="font-size: 11px; letter-spacing: 1px;">PILOT NAME:</span>
       <input type="text" id="displayNameInput" maxlength="20" placeholder="Anonymous" style="flex: 1; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 6px 10px; font-size: 13px; letter-spacing: 1px; outline: none;">
     </div>
+    <div id="weeklyChallenge" style="text-align: center; margin: 10px 0; padding: 8px 12px; border: 1px solid var(--pink); background: rgba(255,45,149,0.08);">
+      <div class="dim" style="font-size: 10px; letter-spacing: 2px; margin-bottom: 2px;">WEEKLY CHALLENGE</div>
+      <div id="weeklyChallengeInfo" style="font-size: 12px; color: var(--pink);">&nbsp;</div>
+      <button class="btn secondary" id="playChallengeBtn" style="margin-top: 6px; padding: 4px 14px; font-size: 11px; border-color: var(--pink); color: var(--pink);">Play This Week's Seed</button>
+    </div>
     <div class="btn-row">
       <button class="btn" id="startBtn">Launch Run</button>
       <button class="btn secondary" id="leaderboardBtn">Leaderboard</button>
@@ -183,9 +188,10 @@
     <h1 style="font-size: 40px;">LEADERBOARD</h1>
     <h2>Top pilots across the grid</h2>
     <div id="myBestLine" class="dim" style="text-align: center; font-size: 12px; margin-bottom: 10px;"></div>
-    <div style="display: flex; gap: 6px; justify-content: center; margin-bottom: 10px;">
+    <div style="display: flex; gap: 6px; justify-content: center; margin-bottom: 10px; flex-wrap: wrap;">
       <button class="btn secondary lb-scope-active" id="lbScopeGlobal" style="padding: 4px 14px; font-size: 11px;">Global</button>
       <button class="btn secondary" id="lbScopeFriends" style="padding: 4px 14px; font-size: 11px;">Friends Only</button>
+      <button class="btn secondary" id="lbScopeChallenge" style="padding: 4px 14px; font-size: 11px;">This Week</button>
     </div>
     <div id="leaderboardList" style="max-height: 420px; overflow-y: auto; font-family: monospace; font-size: 12px;">
       <div class="dim" style="text-align: center; padding: 40px 0;">Loading...</div>

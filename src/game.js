@@ -31,6 +31,11 @@ import {
   fetchMyFriendships,
   fetchFriendsLeaderboard
 } from './friends.js';
+import {
+  getCurrentChallengeWeek,
+  getCurrentChallengeSeed,
+  fetchChallengeLeaderboard
+} from './challenges.js';
 
 
 // ============================================================
@@ -309,11 +314,14 @@ function newRun(options = {}) {
     ? options.seed
     : Math.floor(Math.random() * 0x7fffffff);
   setRandomSeed(runSeed);
+  const challengeWeek = options.challengeWeek || null;
   const startingCores = meta.nodes.startBank.level * 3;
   startBGM();
   run = {
     active: true,
     paused: false,
+    seed: runSeed,
+    challengeWeek,
     player: {
       x: W / 2, y: H / 2,
       vx: 0, vy: 0,
@@ -4215,6 +4223,7 @@ function gameOver() {
   submitScore({
     wave: run.waveNum,
     score: run.score,
+    challengeWeek: run.challengeWeek,
     bestCombo: run.bestCombo,
     cores: run.cores,
     runDurationMs: Math.round(run.timeElapsed * 1000),
@@ -4398,11 +4407,12 @@ document.getElementById('abandonBtn').onclick = () => {
   function paintScopeButtons() {
     const g = document.getElementById('lbScopeGlobal');
     const f = document.getElementById('lbScopeFriends');
-    if (!g || !f) return;
+    const c = document.getElementById('lbScopeChallenge');
     const base = 'padding: 4px 14px; font-size: 11px;';
     const active = ' border-color: var(--pink); color: var(--pink);';
-    g.style.cssText = base + (leaderboardScope === 'global' ? active : '');
-    f.style.cssText = base + (leaderboardScope === 'friends' ? active : '');
+    if (g) g.style.cssText = base + (leaderboardScope === 'global' ? active : '');
+    if (f) f.style.cssText = base + (leaderboardScope === 'friends' ? active : '');
+    if (c) c.style.cssText = base + (leaderboardScope === 'challenge' ? active : '');
   }
   async function loadLeaderboard() {
     const list = document.getElementById('leaderboardList');
@@ -4419,7 +4429,9 @@ document.getElementById('abandonBtn').onclick = () => {
       list.innerHTML = '<div class="dim" style="text-align: center; padding: 40px 0;">Sign in to see your friends-only leaderboard.</div>';
       return;
     }
-    const fetcher = leaderboardScope === 'friends' ? fetchFriendsLeaderboard : fetchLeaderboard;
+    const fetcher = leaderboardScope === 'friends' ? fetchFriendsLeaderboard
+                  : leaderboardScope === 'challenge' ? () => fetchChallengeLeaderboard(null, 20)
+                  : fetchLeaderboard;
     const [rows, myBest] = await Promise.all([fetcher(20), fetchMyBest()]);
     if (myBest) {
       myBestLine.textContent = `Your best: Wave ${myBest.wave} · Score ${myBest.score.toLocaleString()}`;
@@ -4436,8 +4448,28 @@ document.getElementById('abandonBtn').onclick = () => {
   }
   const lbScopeG = document.getElementById('lbScopeGlobal');
   const lbScopeF = document.getElementById('lbScopeFriends');
+  const lbScopeC = document.getElementById('lbScopeChallenge');
   if (lbScopeG) lbScopeG.onclick = () => { leaderboardScope = 'global'; loadLeaderboard(); };
   if (lbScopeF) lbScopeF.onclick = () => { leaderboardScope = 'friends'; loadLeaderboard(); };
+  if (lbScopeC) lbScopeC.onclick = () => { leaderboardScope = 'challenge'; loadLeaderboard(); };
+
+  // Weekly challenge banner + button on title screen
+  const challengeInfo = document.getElementById('weeklyChallengeInfo');
+  if (challengeInfo) {
+    const week = getCurrentChallengeWeek();
+    const dateLabel = new Date(week).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    challengeInfo.textContent = `Week of ${dateLabel} · Same seed for every pilot`;
+  }
+  const playChallengeBtn = document.getElementById('playChallengeBtn');
+  if (playChallengeBtn) {
+    playChallengeBtn.onclick = () => {
+      hideAll();
+      newRun({
+        seed: getCurrentChallengeSeed(),
+        challengeWeek: getCurrentChallengeWeek()
+      });
+    };
+  }
   document.getElementById('closeLeaderboardBtn').onclick = () => {
     hideAll();
     document.getElementById('titleScreen').classList.remove('hidden');

@@ -47,7 +47,7 @@ function isPlausibleScore(submission) {
 }
 
 // ---- Submit run results ----
-export async function submitScore({ wave, score, bestCombo, cores, runDurationMs, upgrades }) {
+export async function submitScore({ wave, score, bestCombo, cores, runDurationMs, upgrades, challengeWeek }) {
   if (!online) return { success: false, reason: 'offline' };
   if (!isPlausibleScore({ wave, score, bestCombo, cores })) {
     return { success: false, reason: 'implausible' };
@@ -70,7 +70,8 @@ export async function submitScore({ wave, score, bestCombo, cores, runDurationMs
       best_combo: bestCombo,
       cores,
       run_duration_ms: runDurationMs,
-      upgrades_picked: upgrades || []
+      upgrades_picked: upgrades || [],
+      challenge_week: challengeWeek || null
     });
     if (error) {
       console.warn('Score submission failed:', error);
