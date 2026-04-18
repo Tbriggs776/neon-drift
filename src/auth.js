@@ -10,12 +10,19 @@ import { supabase, online } from './supabaseClient.js';
 let currentSession = null;
 let currentProfile = null;
 let initialized = false;
+let recoveryMode = false; // true when the user arrived via a password-reset link
 const listeners = new Set();
+const recoveryListeners = new Set();
 
 function emit() {
   const snapshot = { session: currentSession, profile: currentProfile };
   for (const fn of listeners) {
     try { fn(snapshot); } catch (e) { console.warn('auth listener threw:', e); }
+  }
+}
+function emitRecovery() {
+  for (const fn of recoveryListeners) {
+    try { fn(recoveryMode); } catch (e) { console.warn('recovery listener threw:', e); }
   }
 }
 
@@ -24,6 +31,14 @@ export function onAuthChange(fn) {
   fn({ session: currentSession, profile: currentProfile });
   return () => listeners.delete(fn);
 }
+
+export function onRecoveryMode(fn) {
+  recoveryListeners.add(fn);
+  fn(recoveryMode);
+  return () => recoveryListeners.delete(fn);
+}
+
+export function isInRecoveryMode() { return recoveryMode; }
 
 export function getSession() { return currentSession; }
 export function getProfile() { return currentProfile; }
@@ -58,15 +73,44 @@ export async function initAuth() {
   if (session?.user?.id) await loadProfile(session.user.id);
   emit();
 
-  supabase.auth.onAuthStateChange(async (_event, session) => {
+  supabase.auth.onAuthStateChange(async (event, session) => {
     currentSession = session;
     if (session?.user?.id) {
       await loadProfile(session.user.id);
     } else {
       currentProfile = null;
     }
+    if (event === 'PASSWORD_RECOVERY') {
+      recoveryMode = true;
+      emitRecovery();
+    }
     emit();
   });
+}
+
+export async function requestPasswordReset(email) {
+  if (!online) return { error: { message: 'Leaderboard offline' } };
+  const cleaned = (email || '').trim().toLowerCase();
+  if (!cleaned || !cleaned.includes('@') || cleaned.length > 254) {
+    return { error: { message: 'Enter a valid email' } };
+  }
+  const { error } = await supabase.auth.resetPasswordForEmail(cleaned, {
+    redirectTo: window.location.origin + window.location.pathname
+  });
+  return { error };
+}
+
+export async function updatePassword(newPassword) {
+  if (!online) return { error: { message: 'Leaderboard offline' } };
+  if (!newPassword || newPassword.length < 6) {
+    return { error: { message: 'Password must be at least 6 characters' } };
+  }
+  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  if (!error) {
+    recoveryMode = false;
+    emitRecovery();
+  }
+  return { error };
 }
 
 function validateCreds(email, password) {

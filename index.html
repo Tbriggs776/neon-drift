@@ -105,6 +105,7 @@
       <button class="btn" id="startBtn">Launch Run</button>
       <button class="btn secondary" id="leaderboardBtn">Leaderboard</button>
       <button class="btn secondary" id="friendsBtn">Friends</button>
+      <button class="btn secondary hidden" id="profileBtn">Profile</button>
       <button class="btn secondary" id="metaBtn">Hangar</button>
       <button class="btn secondary" id="resetBtn">Reset</button>
     </div>
@@ -126,6 +127,52 @@
       <button class="btn" id="signInBtn">Sign In</button>
       <button class="btn secondary" id="signUpBtn">Sign Up</button>
       <button class="btn secondary" id="closeAuthBtn">Cancel</button>
+    </div>
+    <div style="text-align: center; margin-top: 10px;">
+      <button class="btn secondary" id="forgotPasswordBtn" style="padding: 4px 10px; font-size: 11px; background: transparent; border: none; color: var(--cyan); text-decoration: underline; box-shadow: none;">Forgot password?</button>
+    </div>
+  </div>
+</div>
+
+<!-- Profile screen (signed-in users only) -->
+<div id="profileScreen" class="overlay hidden">
+  <div class="card" style="max-width: 520px;">
+    <h1 style="font-size: 38px;">PROFILE</h1>
+    <h2 id="profileEmailDisplay">&nbsp;</h2>
+    <div class="divider"></div>
+    <div style="margin: 14px 0;">
+      <div class="dim" style="font-size: 11px; letter-spacing: 1px; margin-bottom: 4px;">PILOT NAME</div>
+      <input type="text" id="profileNameInput" maxlength="20" placeholder="Pilot name" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 8px 12px; font-size: 14px; letter-spacing: 1px; outline: none;">
+      <div id="profileNameSaved" class="dim" style="font-size: 10px; min-height: 14px; margin-top: 4px;"></div>
+    </div>
+    <div class="divider"></div>
+    <div style="margin: 14px 0;">
+      <div class="dim" style="font-size: 11px; letter-spacing: 1px; margin-bottom: 4px;">CHANGE PASSWORD</div>
+      <input type="password" id="profileNewPassword" placeholder="new password (6+ chars)" autocomplete="new-password" minlength="6" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 8px 12px; font-size: 14px; letter-spacing: 1px; outline: none; margin-bottom: 6px;">
+      <input type="password" id="profileConfirmPassword" placeholder="confirm new password" autocomplete="new-password" minlength="6" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 8px 12px; font-size: 14px; letter-spacing: 1px; outline: none;">
+      <div id="profilePasswordMsg" class="dim" style="font-size: 11px; min-height: 16px; margin-top: 4px; text-align: center;"></div>
+      <button class="btn secondary" id="profileUpdatePasswordBtn" style="margin-top: 4px;">Update Password</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="profileSignOutBtn" style="color: var(--red, #ff4d6d); border-color: var(--red, #ff4d6d);">Sign Out</button>
+      <button class="btn secondary" id="closeProfileBtn">Back</button>
+    </div>
+  </div>
+</div>
+
+<!-- Recovery screen: shown automatically when user arrives via password-reset link -->
+<div id="recoveryScreen" class="overlay hidden">
+  <div class="card" style="max-width: 480px;">
+    <h1 style="font-size: 34px;">RESET PASSWORD</h1>
+    <h2>Set a new password</h2>
+    <p class="dim">You followed a password-reset link. Enter a new password below to finish signing in.</p>
+    <div style="margin: 14px 0; display: flex; flex-direction: column; gap: 8px;">
+      <input type="password" id="recoveryNewPassword" placeholder="new password (6+ chars)" autocomplete="new-password" minlength="6" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 10px 12px; font-size: 14px; letter-spacing: 1px; outline: none;">
+      <input type="password" id="recoveryConfirmPassword" placeholder="confirm new password" autocomplete="new-password" minlength="6" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 10px 12px; font-size: 14px; letter-spacing: 1px; outline: none;">
+    </div>
+    <div id="recoveryMessage" class="dim" style="text-align: center; font-size: 12px; min-height: 18px; margin-bottom: 8px;"></div>
+    <div class="btn-row">
+      <button class="btn" id="recoverySaveBtn">Save Password</button>
     </div>
   </div>
 </div>

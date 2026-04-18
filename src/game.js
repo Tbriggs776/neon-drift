@@ -11,11 +11,15 @@ import {
 import {
   initAuth,
   onAuthChange,
+  onRecoveryMode,
   signInWithPassword,
   signUpWithPassword,
+  requestPasswordReset,
+  updatePassword,
   signOut,
   setProfileDisplayName,
   isSignedIn,
+  getSession,
   getProfile
 } from './auth.js';
 import {
@@ -4531,6 +4535,7 @@ document.getElementById('abandonBtn').onclick = () => {
   });
 
   // Reflect auth state in the title-screen UI whenever it changes
+  const profileBtn = document.getElementById('profileBtn');
   onAuthChange(({ session, profile }) => {
     if (!authStatusText || !authActionBtn) return;
     if (session?.user) {
@@ -4538,15 +4543,185 @@ document.getElementById('abandonBtn').onclick = () => {
       authStatusText.textContent = `SIGNED IN: ${name.toUpperCase()}`;
       authStatusText.classList.remove('dim');
       authActionBtn.textContent = 'Sign Out';
+      if (profileBtn) profileBtn.classList.remove('hidden');
       // If we just landed back from a magic-link redirect, return to title.
       if (!authScreen.classList.contains('hidden')) closeAuthScreen();
     } else {
       authStatusText.textContent = 'NOT SIGNED IN';
       authStatusText.classList.add('dim');
       authActionBtn.textContent = 'Sign In';
+      if (profileBtn) profileBtn.classList.add('hidden');
     }
     refreshNameInput();
   });
+
+  // ----------------------------------------------------------
+  // FORGOT PASSWORD (on auth screen)
+  // ----------------------------------------------------------
+  const forgotBtn = document.getElementById('forgotPasswordBtn');
+  if (forgotBtn) {
+    forgotBtn.onclick = async () => {
+      const email = (authEmailInput?.value || '').trim();
+      if (!email) {
+        showAuthMessage('Enter your email above first, then tap Forgot.', 'error');
+        authEmailInput?.focus();
+        return;
+      }
+      forgotBtn.disabled = true;
+      showAuthMessage('Sending reset link...', '');
+      const { error } = await requestPasswordReset(email);
+      forgotBtn.disabled = false;
+      if (error) {
+        showAuthMessage(error.message || 'Reset failed', 'error');
+      } else {
+        showAuthMessage(`Reset link sent to ${email}. Check your inbox.`, 'success');
+      }
+    };
+  }
+
+  // ----------------------------------------------------------
+  // PROFILE SCREEN
+  // ----------------------------------------------------------
+  const profileScreen = document.getElementById('profileScreen');
+  const profileEmailDisplay = document.getElementById('profileEmailDisplay');
+  const profileNameInput = document.getElementById('profileNameInput');
+  const profileNameSaved = document.getElementById('profileNameSaved');
+  const profileNewPassword = document.getElementById('profileNewPassword');
+  const profileConfirmPassword = document.getElementById('profileConfirmPassword');
+  const profilePasswordMsg = document.getElementById('profilePasswordMsg');
+  const profileUpdatePasswordBtn = document.getElementById('profileUpdatePasswordBtn');
+  const profileSignOutBtn = document.getElementById('profileSignOutBtn');
+  const closeProfileBtn = document.getElementById('closeProfileBtn');
+
+  function openProfile() {
+    if (!isSignedIn()) return;
+    hideAll();
+    profileScreen.classList.remove('hidden');
+    const s = getSession();
+    const p = getProfile();
+    profileEmailDisplay.textContent = s?.user?.email || '';
+    profileNameInput.value = p?.display_name || '';
+    profileNameSaved.textContent = '';
+    profileNewPassword.value = '';
+    profileConfirmPassword.value = '';
+    profilePasswordMsg.textContent = '';
+    profilePasswordMsg.style.color = '';
+  }
+  function closeProfile() {
+    hideAll();
+    document.getElementById('titleScreen').classList.remove('hidden');
+  }
+
+  if (profileBtn) profileBtn.onclick = openProfile;
+  if (closeProfileBtn) closeProfileBtn.onclick = closeProfile;
+
+  if (profileNameInput) {
+    let t = null;
+    profileNameInput.addEventListener('input', (e) => {
+      const v = e.target.value;
+      if (t) clearTimeout(t);
+      t = setTimeout(async () => {
+        const { error } = await setProfileDisplayName(v);
+        profileNameSaved.textContent = error ? (error.message || 'Save failed') : 'Saved ✓';
+        profileNameSaved.style.color = error ? 'var(--red, #ff4d6d)' : 'var(--cyan)';
+        refreshNameInput(); // keep title input in sync
+      }, 400);
+    });
+  }
+
+  if (profileUpdatePasswordBtn) {
+    profileUpdatePasswordBtn.onclick = async () => {
+      const np = profileNewPassword.value;
+      const cp = profileConfirmPassword.value;
+      if (np.length < 6) {
+        profilePasswordMsg.textContent = 'Password must be at least 6 characters';
+        profilePasswordMsg.style.color = 'var(--red, #ff4d6d)';
+        return;
+      }
+      if (np !== cp) {
+        profilePasswordMsg.textContent = 'Passwords do not match';
+        profilePasswordMsg.style.color = 'var(--red, #ff4d6d)';
+        return;
+      }
+      profileUpdatePasswordBtn.disabled = true;
+      profilePasswordMsg.textContent = 'Updating...';
+      profilePasswordMsg.style.color = '';
+      const { error } = await updatePassword(np);
+      profileUpdatePasswordBtn.disabled = false;
+      if (error) {
+        profilePasswordMsg.textContent = error.message || 'Update failed';
+        profilePasswordMsg.style.color = 'var(--red, #ff4d6d)';
+      } else {
+        profilePasswordMsg.textContent = 'Password updated ✓';
+        profilePasswordMsg.style.color = 'var(--cyan)';
+        profileNewPassword.value = '';
+        profileConfirmPassword.value = '';
+      }
+    };
+  }
+
+  if (profileSignOutBtn) {
+    profileSignOutBtn.onclick = async () => {
+      profileSignOutBtn.disabled = true;
+      await signOut();
+      profileSignOutBtn.disabled = false;
+      closeProfile();
+    };
+  }
+
+  // ----------------------------------------------------------
+  // PASSWORD RECOVERY FLOW (arrived via reset email link)
+  // ----------------------------------------------------------
+  const recoveryScreen = document.getElementById('recoveryScreen');
+  const recoveryNewPassword = document.getElementById('recoveryNewPassword');
+  const recoveryConfirmPassword = document.getElementById('recoveryConfirmPassword');
+  const recoveryMessage = document.getElementById('recoveryMessage');
+  const recoverySaveBtn = document.getElementById('recoverySaveBtn');
+
+  onRecoveryMode((active) => {
+    if (!recoveryScreen) return;
+    if (active) {
+      hideAll();
+      recoveryScreen.classList.remove('hidden');
+      recoveryMessage.textContent = '';
+      recoveryNewPassword.value = '';
+      recoveryConfirmPassword.value = '';
+      setTimeout(() => recoveryNewPassword?.focus(), 50);
+    }
+  });
+
+  if (recoverySaveBtn) {
+    recoverySaveBtn.onclick = async () => {
+      const np = recoveryNewPassword.value;
+      const cp = recoveryConfirmPassword.value;
+      if (np.length < 6) {
+        recoveryMessage.textContent = 'Password must be at least 6 characters';
+        recoveryMessage.style.color = 'var(--red, #ff4d6d)';
+        return;
+      }
+      if (np !== cp) {
+        recoveryMessage.textContent = 'Passwords do not match';
+        recoveryMessage.style.color = 'var(--red, #ff4d6d)';
+        return;
+      }
+      recoverySaveBtn.disabled = true;
+      recoveryMessage.textContent = 'Saving...';
+      recoveryMessage.style.color = '';
+      const { error } = await updatePassword(np);
+      recoverySaveBtn.disabled = false;
+      if (error) {
+        recoveryMessage.textContent = error.message || 'Save failed';
+        recoveryMessage.style.color = 'var(--red, #ff4d6d)';
+      } else {
+        recoveryMessage.textContent = 'Password saved. You are signed in.';
+        recoveryMessage.style.color = 'var(--cyan)';
+        setTimeout(() => {
+          hideAll();
+          document.getElementById('titleScreen').classList.remove('hidden');
+        }, 800);
+      }
+    };
+  }
 
   // ----------------------------------------------------------
   // FRIENDS UI WIRING
