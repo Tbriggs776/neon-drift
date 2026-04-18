@@ -448,6 +448,10 @@
   #touchUI.visible { display: block; }
   body.touch-mode { cursor: default; }
   body.touch-mode #game { touch-action: none; }
+  /* Hide touch UI whenever any modal overlay (title, leaderboard, friends,
+     auth, hangar, upgrade, shop, death, pause) is showing — otherwise the
+     50vw stick zones intercept taps meant for buttons inside the card. */
+  body:has(.overlay:not(.hidden)) #touchUI { display: none !important; }
 
   .stick-zone {
     position: absolute;
