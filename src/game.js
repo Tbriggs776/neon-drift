@@ -1,4 +1,5 @@
 import './styles.css';
+import { setRandomSeed, gameRand, getCurrentSeed } from './rng.js';
 import {
   submitScore,
   fetchLeaderboard,
@@ -303,7 +304,11 @@ function getWaveInfo(waveNum) {
 
 let run = null;
 
-function newRun() {
+function newRun(options = {}) {
+  const runSeed = options.seed !== undefined
+    ? options.seed
+    : Math.floor(Math.random() * 0x7fffffff);
+  setRandomSeed(runSeed);
   const startingCores = meta.nodes.startBank.level * 3;
   startBGM();
   run = {
@@ -400,7 +405,7 @@ function newRun() {
   if (starterCount > 0) {
     const commons = UPGRADES.filter(u => u.rarity === 'common');
     for (let i = 0; i < starterCount; i++) {
-      const choice = commons[Math.floor(Math.random() * commons.length)];
+      const choice = commons[Math.floor(gameRand() * commons.length)];
       applyUpgrade(choice);
     }
     toast(`Starter: ${starterCount} augment${starterCount > 1 ? 's' : ''}`);
@@ -574,7 +579,7 @@ function generateObstaclesForWave(waveNum, waveInfo) {
   // Wave 1: always open so new players get comfortable
   if (waveNum === 1) return [];
   // Wave 2: occasionally still open
-  if (waveNum === 2 && Math.random() < 0.5) return [];
+  if (waveNum === 2 && gameRand() < 0.5) return [];
   // Pick template based on wave number (rotates through pool, skipping OPEN for non-boss waves)
   const nonOpenTemplates = MAP_TEMPLATES.filter(t => t.name !== 'OPEN');
   const idx = (waveNum - 1) % nonOpenTemplates.length;
@@ -624,14 +629,14 @@ function startWave(waveNum) {
     run.spawnQueue.push({ type: info.bossType, delay: 0.6, scale: info.bossScale, diff: info.diffMul });
   } else {
     for (let i = 0; i < info.enemyCount; i++) {
-      const type = info.types[Math.floor(Math.random() * info.types.length)];
+      const type = info.types[Math.floor(gameRand() * info.types.length)];
       // Spawn cadence tightens with difficulty
       // Spawn cadence tightens with difficulty but never too fast
       const baseDelay = Math.max(0.18, 0.65 - info.diffMul * 0.02);
       const jitter = 0.4 - Math.min(0.22, info.diffMul * 0.01);
       run.spawnQueue.push({
         type,
-        delay: baseDelay + Math.random() * jitter,
+        delay: baseDelay + gameRand() * jitter,
         scale: info.diffMul,
         diff: info.diffMul
       });
@@ -684,12 +689,12 @@ function spawnEnemy(type, scale = 1, diffMul = 1) {
   const def = ENEMY_DEFS[type];
   if (!def) return;
   // Spawn at random edge
-  const side = Math.floor(Math.random() * 4);
+  const side = Math.floor(gameRand() * 4);
   let x, y;
-  if (side === 0) { x = Math.random() * W; y = -30; }
-  else if (side === 1) { x = W + 30; y = Math.random() * H; }
-  else if (side === 2) { x = Math.random() * W; y = H + 30; }
-  else { x = -30; y = Math.random() * H; }
+  if (side === 0) { x = gameRand() * W; y = -30; }
+  else if (side === 1) { x = W + 30; y = gameRand() * H; }
+  else if (side === 2) { x = gameRand() * W; y = H + 30; }
+  else { x = -30; y = gameRand() * H; }
   // Bosses spawn top center
   if (def.ai === 'warden' || def.ai === 'obelisk' || def.ai === 'hive' ||
       def.ai === 'sentinel' || def.ai === 'prism') {
@@ -725,7 +730,7 @@ function spawnEnemy(type, scale = 1, diffMul = 1) {
     score: Math.ceil(def.score * scale),
     ai: def.ai,
     baseSpeed: def.speed * speedScale,
-    fireCD: def.fireRate ? Math.random() * def.fireRate : 0,
+    fireCD: def.fireRate ? gameRand() * def.fireRate : 0,
     fireRate: def.fireRate ? def.fireRate / (1 + (diffMul - 1) * 0.15) : 0,
     angle: 0,
     t: 0,
@@ -783,7 +788,7 @@ function offerUpgrades() {
   const luck = run.passives.luckBonus;
   const rolls = [];
   for (let i = 0; i < 3; i++) {
-    const r = Math.random();
+    const r = gameRand();
     let rarity;
     // Rarity gates improve with waves
     const legendaryChance = Math.min(0.35, 0.05 + Math.max(0, waveNum - 5) * 0.02 + luck * 0.5);
@@ -794,9 +799,9 @@ function offerUpgrades() {
     const pool = UPGRADES.filter(u => u.rarity === rarity && !rolls.find(x => x.id === u.id));
     if (pool.length === 0) {
       const fallback = UPGRADES.filter(u => !rolls.find(x => x.id === u.id));
-      rolls.push(fallback[Math.floor(Math.random() * fallback.length)]);
+      rolls.push(fallback[Math.floor(gameRand() * fallback.length)]);
     } else {
-      rolls.push(pool[Math.floor(Math.random() * pool.length)]);
+      rolls.push(pool[Math.floor(gameRand() * pool.length)]);
     }
   }
 
@@ -847,7 +852,7 @@ const SHOP_ITEMS = [
 
 function openShop() {
   // Offer 4 items
-  const shuffled = [...SHOP_ITEMS].sort(() => Math.random() - 0.5);
+  const shuffled = [...SHOP_ITEMS].sort(() => gameRand() - 0.5);
   const picks = shuffled.slice(0, 4);
   // Scale costs with wave progression (more expensive on later bosses)
   const waveMul = 1 + Math.floor(run.waveNum / 5 - 1) * 0.15;
@@ -1563,7 +1568,7 @@ function firePlayer() {
       const t = i / (count - 1);
       angle += (t - 0.5) * spread;
     }
-    const isCrit = Math.random() < w.crit;
+    const isCrit = gameRand() < w.crit;
     run.projectiles.push({
       x: run.player.x + Math.cos(angle) * 16,
       y: run.player.y + Math.sin(angle) * 16,
@@ -1625,7 +1630,7 @@ function spawnDrone() {
   run.drones.push({
     orbitAngle: Math.random() * Math.PI * 2,
     orbitRadius: 44,
-    fireCD: 0.15 + Math.random() * 0.3,
+    fireCD: 0.15 + gameRand() * 0.3,
     x: run.player.x,
     y: run.player.y,
     angle: 0
@@ -2256,10 +2261,10 @@ const POWERUPS = [
 function maybeDropPowerup(x, y, dropChanceMultiplier = 1) {
   // Base drop chance: 20%. Multiplier is higher for bosses.
   const base = 0.20 * dropChanceMultiplier;
-  if (Math.random() > base) return;
+  if (gameRand() > base) return;
   // Weighted pick from pool
   const totalWeight = POWERUPS.reduce((s, p) => s + p.chance, 0);
-  let roll = Math.random() * totalWeight;
+  let roll = gameRand() * totalWeight;
   let chosen = POWERUPS[0];
   for (const p of POWERUPS) {
     roll -= p.chance;
@@ -2540,8 +2545,8 @@ function updateEnemies(dt) {
           spawnEnemy('grunt', 0.5, adjInfo ? adjInfo.diffMul * 0.6 : 1);
           // Move last spawned to near the hive
           const last = run.enemies[run.enemies.length - 1];
-          last.x = e.x + (Math.random() - 0.5) * 40;
-          last.y = e.y + (Math.random() - 0.5) * 40;
+          last.x = e.x + (gameRand() - 0.5) * 40;
+          last.y = e.y + (gameRand() - 0.5) * 40;
         }
         spawnExplosion(e.x, e.y, '#39ff14', 25);
         e.fireCD = e.fireRate;
@@ -2839,8 +2844,8 @@ function killEnemy(idx) {
     for (let k = 0; k < e.splitLeft; k++) {
       spawnEnemy('grunt', 0.5 * diff, diff);
       const last = run.enemies[run.enemies.length - 1];
-      last.x = e.x + (Math.random() - 0.5) * 30;
-      last.y = e.y + (Math.random() - 0.5) * 30;
+      last.x = e.x + (gameRand() - 0.5) * 30;
+      last.y = e.y + (gameRand() - 0.5) * 30;
       last.hp = last.maxHp * 0.5;
       last.maxHp = last.hp;
     }
@@ -2848,10 +2853,10 @@ function killEnemy(idx) {
 
   // Drop cores - scales with enemy type
   let coreCount;
-  if (['warden'].includes(e.type)) coreCount = 30 + Math.floor(Math.random() * 15);
-  else if (['obelisk', 'hive', 'sentinel', 'prism'].includes(e.type)) coreCount = 12 + Math.floor(Math.random() * 8);
-  else if (['bomber', 'lancer', 'splitter'].includes(e.type)) coreCount = 2 + (Math.random() < 0.3 ? 1 : 0);
-  else coreCount = 1 + (Math.random() < 0.3 ? 1 : 0);
+  if (['warden'].includes(e.type)) coreCount = 30 + Math.floor(gameRand() * 15);
+  else if (['obelisk', 'hive', 'sentinel', 'prism'].includes(e.type)) coreCount = 12 + Math.floor(gameRand() * 8);
+  else if (['bomber', 'lancer', 'splitter'].includes(e.type)) coreCount = 2 + (gameRand() < 0.3 ? 1 : 0);
+  else coreCount = 1 + (gameRand() < 0.3 ? 1 : 0);
 
   for (let i = 0; i < coreCount; i++) {
     run.pickups.push({
