@@ -1157,6 +1157,15 @@ document.getElementById('pauseBtn').addEventListener('touchstart', (e) => {
   if (run && run.active) togglePause();
 }, { passive: false });
 
+// Touch-only devices (phones/tablets) start in touch mode so #touchUI is
+// visible — otherwise its child stick zones are display:none and can never
+// receive the touchstart that would activate touch mode (chicken/egg).
+// Hybrid devices with hover (touchscreen laptops) stay in kbm and switch
+// on demand if the user actually taps.
+if (isTouchDevice && !window.matchMedia('(hover: hover)').matches) {
+  setInputMode('touch');
+}
+
 // --- Gamepad ---
 // Note: some environments (Claude preview iframe, sandboxed embeds) block the
 // Gamepad API via Permissions-Policy. We guard everything so a failed access
