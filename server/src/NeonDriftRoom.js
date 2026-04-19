@@ -34,6 +34,8 @@ class Player extends Schema {
     // Companion counts — synced so clients can render drones around each pilot.
     this.droneCount = 0;
     this.extraShots = 0;
+    // Dash cooldown synced so the local client can render a cooldown ring.
+    this.dashCD = 0;
     // server-only:
     this.fireCD = 0;
     this.iframes = 0;
@@ -58,6 +60,7 @@ type('float32')(Player.prototype, 'speedMul');
 type('float32')(Player.prototype, 'fireRateMul');
 type('int8')(Player.prototype, 'droneCount');
 type('int8')(Player.prototype, 'extraShots');
+type('float32')(Player.prototype, 'dashCD');
 
 class Enemy extends Schema {
   constructor() {
@@ -231,6 +234,30 @@ class NeonDriftRoom extends Room {
       });
     });
 
+    this.onMessage('dash', (client) => {
+      if (!this.state.started || this.state.gameOver || this.upgradePhase) return;
+      const p = this.state.players.get(client.sessionId);
+      if (!p || p.dead || (p.dashCD || 0) > 0) return;
+      const inp = this.playerInput.get(client.sessionId);
+      // Dash goes in the move direction if any, else in aim direction.
+      let dx = 0, dy = 0;
+      if (inp) {
+        const mag = Math.hypot(inp.moveX || 0, inp.moveY || 0);
+        if (mag > 0.15) {
+          dx = inp.moveX / mag;
+          dy = inp.moveY / mag;
+        } else {
+          dx = Math.cos(inp.aimAngle || 0);
+          dy = Math.sin(inp.aimAngle || 0);
+        }
+      }
+      p.x = clamp(p.x + dx * 120, 12, WORLD_W - 12);
+      p.y = clamp(p.y + dy * 120, 12, WORLD_H - 12);
+      p.iframes = 0.35;
+      p.dashCD = 1.0;
+      this.broadcast('fx', { type: 'dash', x: p.x, y: p.y });
+    });
+
     this.onMessage('pickUpgrade', (client, payload) => {
       if (!this.upgradePhase) return;
       const p = this.state.players.get(client.sessionId);
@@ -266,6 +293,7 @@ class NeonDriftRoom extends Room {
         pl.dead = false;
         pl.iframes = 0;
         pl.fireCD = 0;
+        pl.dashCD = 0;
         pl.score = 0;
         // Reset per-run stats and companions
         pl.damageMul = 1;
@@ -368,6 +396,7 @@ class NeonDriftRoom extends Room {
     this.state.players.forEach((p, sid) => {
       if (p.iframes > 0) p.iframes = Math.max(0, p.iframes - dt);
       p.fireCD = Math.max(0, (p.fireCD || 0) - dt);
+      p.dashCD = Math.max(0, (p.dashCD || 0) - dt);
       if (p.dead) return;
       const inp = this.playerInput.get(sid);
       if (!inp) return;

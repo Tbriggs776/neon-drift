@@ -50,6 +50,7 @@ import {
   sendSetReady,
   sendStart,
   sendPickUpgrade,
+  sendDash,
   sendPlayerState,
   sendInput,
   getRemotePlayers,
@@ -446,12 +447,33 @@ function mpTick(t, dt) {
     });
   }
 
-  // 5. Tick the local cosmetic particle system.
+  // 5. Dash (Shift / dash button). One-shot: consume input.dashRequested.
+  if (input.dashRequested && me && !me.dead && (me.dashCD || 0) <= 0) {
+    input.dashRequested = false;
+    sendDash();
+    // Predict locally for instant feel: snap our predicted position forward
+    // in move direction (or aim if not moving).
+    let dx = input.moveX, dy = input.moveY;
+    const mag = Math.hypot(dx, dy);
+    if (mag > 0.15) { dx /= mag; dy /= mag; }
+    else { dx = Math.cos(input.aimAngle); dy = Math.sin(input.aimAngle); }
+    run.player.x = Math.max(12, Math.min(ww - 12, run.player.x + dx * 120));
+    run.player.y = Math.max(12, Math.min(wh - 12, run.player.y + dy * 120));
+    spawnMpParticles({
+      x: run.player.x, y: run.player.y,
+      color: '#00f0ff', count: 18, speed: 260, life: 0.35, size: 2
+    });
+  } else if (input.dashRequested) {
+    // Consume even if on cooldown so it doesn't queue.
+    input.dashRequested = false;
+  }
+
+  // 6. Tick the local cosmetic particle system.
   updateMpParticles(dt);
 
   run.timeElapsed += dt;
 
-  // 6. Forward input at ~30Hz (server tick rate).
+  // 7. Forward input at ~30Hz (server tick rate).
   if (t - lastMpInputAt > 33) {
     lastMpInputAt = t;
     sendInput({
@@ -549,6 +571,10 @@ function mpRender() {
   if (me && !me.dead) {
     drawMpLocalShip(me);
     drawMpDrones(run.player.x, run.player.y, me.droneCount || 0, '#00f0ff');
+    // Local HP pips + dash CD ring under the ship (in addition to the HUD
+    // pips, because the HUD is at the top of the screen during intense play).
+    drawMpHpPips(run.player.x, run.player.y + 22, me.hp || 0, me.maxHp || 3, '#ff2d95');
+    if ((me.dashCD || 0) > 0) drawMpDashCooldown(run.player.x, run.player.y, me.dashCD);
   } else if (me?.dead) {
     drawMpDeadOverlay();
   }
@@ -662,6 +688,7 @@ function drawMpRemoteShip(r, color) {
   ctx.fill();
   ctx.stroke();
   ctx.restore();
+  // Name label above
   ctx.save();
   ctx.fillStyle = color;
   ctx.font = '11px "Courier New", monospace';
@@ -669,6 +696,29 @@ function drawMpRemoteShip(r, color) {
   ctx.shadowColor = '#000';
   ctx.shadowBlur = 4;
   ctx.fillText(r.name || 'pilot', r.x, r.y - 18);
+  ctx.restore();
+  // HP pips below
+  drawMpHpPips(r.x, r.y + 22, r.hp || 0, r.maxHp || 3, color);
+}
+
+// Small HP pips used for teammate (and local) ship indicators.
+function drawMpHpPips(cx, cy, hp, maxHp, color) {
+  if (!maxHp || maxHp <= 0) return;
+  const pipW = 6, pipGap = 2, pipH = 3;
+  const totalW = maxHp * pipW + (maxHp - 1) * pipGap;
+  const startX = cx - totalW / 2;
+  ctx.save();
+  for (let i = 0; i < maxHp; i++) {
+    if (i < hp) {
+      ctx.fillStyle = color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 4;
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.shadowBlur = 0;
+    }
+    ctx.fillRect(startX + i * (pipW + pipGap), cy, pipW, pipH);
+  }
   ctx.restore();
 }
 
@@ -701,6 +751,20 @@ function drawMpDrones(x, y, count, color) {
     ctx.stroke();
     ctx.restore();
   }
+  ctx.restore();
+}
+
+// Draining arc around the local ship while dash is on cooldown (1s max).
+function drawMpDashCooldown(x, y, cd) {
+  const frac = Math.max(0, Math.min(1, cd / 1.0));
+  const start = -Math.PI / 2;
+  const end = start + Math.PI * 2 * frac;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(0, 240, 255, 0.5)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(x, y, 20, start, end);
+  ctx.stroke();
   ctx.restore();
 }
 

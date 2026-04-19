@@ -180,6 +180,10 @@ export function sendPickUpgrade(id) {
   currentRoom?.send('pickUpgrade', { id });
 }
 
+export function sendDash() {
+  currentRoom?.send('dash');
+}
+
 // Phase 8b legacy: broadcast local player position. Phase 8c the server
 // owns position, so this is a no-op when authoritative-sim is in play.
 export function sendPlayerState(payload) {
@@ -207,6 +211,7 @@ export function getRemotePlayers() {
       x: p.x, y: p.y,
       angle: p.angle,
       hp: p.hp,
+      maxHp: p.maxHp || 3,
       dead: p.dead,
       isHost: p.isHost,
       droneCount: p.droneCount || 0
