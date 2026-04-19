@@ -208,7 +208,8 @@ export function getRemotePlayers() {
       angle: p.angle,
       hp: p.hp,
       dead: p.dead,
-      isHost: p.isHost
+      isHost: p.isHost,
+      droneCount: p.droneCount || 0
     });
   });
   return out;

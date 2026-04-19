@@ -31,11 +31,15 @@ class Player extends Schema {
     // for snappy local feel.
     this.speedMul = 1;
     this.fireRateMul = 1;
+    // Companion counts — synced so clients can render drones around each pilot.
+    this.droneCount = 0;
+    this.extraShots = 0;
     // server-only:
     this.fireCD = 0;
     this.iframes = 0;
     this.damageMul = 1;
     this.magnetMul = 1;
+    this.droneFireCD = 0;
     this.pickedUpgrade = false;
     this.pendingChoices = null;
   }
@@ -52,6 +56,8 @@ type('boolean')(Player.prototype, 'dead');
 type('int32')(Player.prototype, 'score');
 type('float32')(Player.prototype, 'speedMul');
 type('float32')(Player.prototype, 'fireRateMul');
+type('int8')(Player.prototype, 'droneCount');
+type('int8')(Player.prototype, 'extraShots');
 
 class Enemy extends Schema {
   constructor() {
@@ -153,13 +159,15 @@ function generateCode() {
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-// Upgrade pool — stat-only, no special abilities. Each pick is per-player.
+// Upgrade pool — each pick is per-player. Stats stack across picks.
 const UPGRADE_POOL = [
-  { id: 'damage',   name: 'OVERCHARGE',       desc: '+20% damage' },
-  { id: 'fireRate', name: 'RAPID CYCLER',     desc: '+25% fire rate' },
-  { id: 'maxHp',    name: 'REINFORCED HULL',  desc: '+1 max HP (full heal)' },
-  { id: 'speed',    name: 'PHASE DRIVE',      desc: '+15% move speed' },
-  { id: 'magnet',   name: 'CORE MAGNET',      desc: '+60% pickup radius' }
+  { id: 'damage',    name: 'OVERCHARGE',      desc: '+20% damage' },
+  { id: 'fireRate',  name: 'RAPID CYCLER',    desc: '+25% fire rate' },
+  { id: 'maxHp',     name: 'REINFORCED HULL', desc: '+1 max HP (full heal)' },
+  { id: 'speed',     name: 'PHASE DRIVE',     desc: '+15% move speed' },
+  { id: 'magnet',    name: 'CORE MAGNET',     desc: '+60% pickup radius' },
+  { id: 'drone',     name: 'ORBITAL DRONE',   desc: '+1 drone · auto-fires' },
+  { id: 'multishot', name: 'FORK ROUNDS',     desc: '+2 projectiles per shot' }
 ];
 
 function pickRandomUpgrades(n) {
@@ -169,11 +177,13 @@ function pickRandomUpgrades(n) {
 
 function applyUpgrade(player, choice) {
   switch (choice.id) {
-    case 'damage':   player.damageMul   = (player.damageMul   || 1) + 0.20; break;
-    case 'fireRate': player.fireRateMul = (player.fireRateMul || 1) + 0.25; break;
-    case 'maxHp':    player.maxHp += 1; player.hp = player.maxHp; break;
-    case 'speed':    player.speedMul    = (player.speedMul    || 1) + 0.15; break;
-    case 'magnet':   player.magnetMul   = (player.magnetMul   || 1) + 0.60; break;
+    case 'damage':    player.damageMul   = (player.damageMul   || 1) + 0.20; break;
+    case 'fireRate':  player.fireRateMul = (player.fireRateMul || 1) + 0.25; break;
+    case 'maxHp':     player.maxHp += 1; player.hp = player.maxHp; break;
+    case 'speed':     player.speedMul    = (player.speedMul    || 1) + 0.15; break;
+    case 'magnet':    player.magnetMul   = (player.magnetMul   || 1) + 0.60; break;
+    case 'drone':     player.droneCount  = (player.droneCount  || 0) + 1;    break;
+    case 'multishot': player.extraShots  = (player.extraShots  || 0) + 2;    break;
   }
 }
 
@@ -257,11 +267,14 @@ class NeonDriftRoom extends Room {
         pl.iframes = 0;
         pl.fireCD = 0;
         pl.score = 0;
-        // Reset per-run stat multipliers
+        // Reset per-run stats and companions
         pl.damageMul = 1;
         pl.fireRateMul = 1;
         pl.speedMul = 1;
         pl.magnetMul = 1;
+        pl.droneCount = 0;
+        pl.extraShots = 0;
+        pl.droneFireCD = 0;
         pl.pickedUpgrade = false;
         pl.pendingChoices = null;
       });
@@ -302,13 +315,51 @@ class NeonDriftRoom extends Room {
   tick(dt) {
     if (!this.state.started || this.state.gameOver) return;
     if (this.upgradePhase) return; // sim is paused while pilots pick upgrades
+    this.simTime = (this.simTime || 0) + dt;
     this.updatePlayers(dt);
+    this.updateDrones(dt);
     this.updateEnemies(dt);
     this.updateProjectiles(dt);
     this.collisions(dt);
     this.collectPickups();
     this.updateSpawning(dt);
     this.checkGameOver();
+  }
+
+  updateDrones(dt) {
+    this.state.players.forEach((p, sid) => {
+      if (p.dead || !p.droneCount) return;
+      p.droneFireCD = Math.max(0, (p.droneFireCD || 0) - dt);
+      if (p.droneFireCD > 0) return;
+      // Fire one volley from every orbiting drone this pilot owns.
+      p.droneFireCD = 0.9;
+      const t = this.simTime || 0;
+      for (let i = 0; i < p.droneCount; i++) {
+        const orbitAngle = t * 2 + (i / p.droneCount) * Math.PI * 2;
+        const dx = p.x + Math.cos(orbitAngle) * 44;
+        const dy = p.y + Math.sin(orbitAngle) * 44;
+        // Target nearest enemy within 400px
+        let target = null, best = Infinity;
+        this.state.enemies.forEach((e) => {
+          const ex = e.x - dx, ey = e.y - dy;
+          const d = Math.hypot(ex, ey);
+          if (d < best) { best = d; target = e; }
+        });
+        if (!target || best > 400) continue;
+        const aim = Math.atan2(target.y - dy, target.x - dx);
+        const proj = new Projectile();
+        proj.x = dx; proj.y = dy; proj.r = 3;
+        proj.ownerType = 'player';
+        proj.ownerId = sid;
+        proj.vx = Math.cos(aim) * 500;
+        proj.vy = Math.sin(aim) * 500;
+        proj.life = 1.2;
+        // Drones do half the damage of the main gun so they feel supportive,
+        // not dominant — you still want to shoot yourself.
+        proj.damage = 0.5 * (p.damageMul || 1);
+        this.state.projectiles.set(String(this.nextEntityId++), proj);
+      }
+    });
   }
 
   updatePlayers(dt) {
@@ -611,14 +662,27 @@ class NeonDriftRoom extends Room {
   }
 
   spawnPlayerProjectile(player, ownerId) {
+    // Main shot
+    this.spawnProjectileAt(player, ownerId, player.angle);
+    // Fork rounds: symmetric fan, ~9° per step, alternating sides
+    const extras = player.extraShots || 0;
+    for (let i = 1; i <= extras; i++) {
+      const side = (i % 2 === 1) ? 1 : -1;
+      const step = Math.ceil(i / 2);
+      const fan = side * step * (Math.PI / 20); // ~9 degrees
+      this.spawnProjectileAt(player, ownerId, player.angle + fan);
+    }
+  }
+
+  spawnProjectileAt(player, ownerId, angle) {
     const proj = new Projectile();
     proj.x = player.x;
     proj.y = player.y;
     proj.r = 4;
     proj.ownerType = 'player';
     proj.ownerId = ownerId || '';
-    proj.vx = Math.cos(player.angle) * 600;
-    proj.vy = Math.sin(player.angle) * 600;
+    proj.vx = Math.cos(angle) * 600;
+    proj.vy = Math.sin(angle) * 600;
     proj.life = 1.5;
     proj.damage = 1 * (player.damageMul || 1);
     this.state.projectiles.set(String(this.nextEntityId++), proj);

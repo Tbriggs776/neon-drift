@@ -537,16 +537,21 @@ function mpRender() {
   for (const p of getRemoteProjectiles()) drawMpProjectile(p);
   // Cosmetic particles (over enemies, under ships)
   drawMpParticles();
-  // Remote ships (pilots other than me)
+  // Remote ships (pilots other than me) + their drones
   let idx = 0;
   for (const r of getRemotePlayers()) {
     drawMpRemoteShip(r, MP_REMOTE_COLORS[idx % MP_REMOTE_COLORS.length]);
+    if (!r.dead) drawMpDrones(r.x, r.y, r.droneCount, MP_REMOTE_COLORS[idx % MP_REMOTE_COLORS.length]);
     idx++;
   }
-  // Local ship (drawn last so it sits on top)
+  // Local ship + drones (drawn last so they sit on top)
   const me = getMyPlayer();
-  if (me && !me.dead) drawMpLocalShip(me);
-  else if (me?.dead) drawMpDeadOverlay();
+  if (me && !me.dead) {
+    drawMpLocalShip(me);
+    drawMpDrones(run.player.x, run.player.y, me.droneCount || 0, '#00f0ff');
+  } else if (me?.dead) {
+    drawMpDeadOverlay();
+  }
 
   ctx.restore();
 
@@ -664,6 +669,38 @@ function drawMpRemoteShip(r, color) {
   ctx.shadowColor = '#000';
   ctx.shadowBlur = 4;
   ctx.fillText(r.name || 'pilot', r.x, r.y - 18);
+  ctx.restore();
+}
+
+// Orbit angle derived from local clock. Client's clock may differ from the
+// server's by a small amount, so the visual drone position won't exactly
+// match the server's fire origin — acceptable since projectiles come from
+// the server with their own spawn coordinates.
+function drawMpDrones(x, y, count, color) {
+  if (!count || count <= 0) return;
+  const t = performance.now() / 1000;
+  ctx.save();
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = color;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < count; i++) {
+    const a = t * 2 + (i / count) * Math.PI * 2;
+    const dx = x + Math.cos(a) * 44;
+    const dy = y + Math.sin(a) * 44;
+    ctx.save();
+    ctx.translate(dx, dy);
+    ctx.rotate(a + Math.PI / 2);
+    ctx.beginPath();
+    ctx.moveTo(0, -6);
+    ctx.lineTo(-5, 5);
+    ctx.lineTo(5, 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.restore();
 }
 
