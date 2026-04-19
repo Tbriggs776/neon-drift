@@ -28,6 +28,7 @@ const gameStartListeners = new Set();
 const gameEndListeners = new Set();
 const upgradeChoicesListeners = new Set();
 const wavePhaseListeners = new Set();
+const fxListeners = new Set();
 
 function snapshot() {
   if (!currentRoom || !currentRoom.state) {
@@ -83,6 +84,13 @@ export function onWavePhase(fn) {
   return () => wavePhaseListeners.delete(fn);
 }
 
+// Cosmetic/audio event broadcasts from the server (enemy death,
+// player hit, boss spawn). Pure feel — no gameplay impact.
+export function onFx(fn) {
+  fxListeners.add(fn);
+  return () => fxListeners.delete(fn);
+}
+
 function wireRoom(room) {
   currentRoom = room;
   room.onStateChange(() => emit());
@@ -113,6 +121,11 @@ function wireRoom(room) {
   room.onMessage('wavePhase', () => {
     for (const fn of wavePhaseListeners) {
       try { fn(); } catch (e) { console.warn(e); }
+    }
+  });
+  room.onMessage('fx', (msg) => {
+    for (const fn of fxListeners) {
+      try { fn(msg); } catch (e) { console.warn(e); }
     }
   });
   emit();

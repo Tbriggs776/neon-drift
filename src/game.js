@@ -43,6 +43,7 @@ import {
   onGameEnd,
   onUpgradeChoices,
   onWavePhase,
+  onFx,
   createRoom,
   joinRoomByCode,
   leaveRoom,
@@ -381,27 +382,76 @@ function mpCanvasToWorld(cx, cy) {
   return { x: (cx - offX) / scale, y: (cy - offY) / scale };
 }
 
+// Local muzzle-flash cooldown so we can predict our fire-rate visually
+// without waiting for server projectile spawns.
+let mpLocalFireCD = 0;
+
 function mpTick(t, dt) {
-  // 1. Pull authoritative state from server into `run` so HUD code keeps working.
+  const { w: ww, h: wh } = getWorldDims();
   const me = getMyPlayer();
+
+  // 1. Reconcile our predicted position against the server's authoritative
+  // position. Big drift (>80px) snaps; small drift gently lerps.
   if (me) {
-    run.player.x = me.x;
-    run.player.y = me.y;
+    if (me.dead) {
+      run.player.x = me.x;
+      run.player.y = me.y;
+    } else {
+      const dx = me.x - run.player.x;
+      const dy = me.y - run.player.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 80) {
+        run.player.x = me.x;
+        run.player.y = me.y;
+      } else if (dist > 1) {
+        run.player.x += dx * 0.25;
+        run.player.y += dy * 0.25;
+      }
+    }
     run.player.hp = me.hp;
     if (me.maxHp) run.player.maxHp = me.maxHp;
   }
+
+  // 2. Predict locally: apply input to our position right now so movement
+  // feels responsive. Server reconciliation (above) corrects drift.
+  if (run.player.hp > 0 && !me?.dead) {
+    const speedMul = me?.speedMul || 1;
+    const speed = 240 * speedMul;
+    let mx = input.moveX, my = input.moveY;
+    const mag = Math.hypot(mx, my);
+    if (mag > 1) { mx /= mag; my /= mag; }
+    run.player.x = Math.max(12, Math.min(ww - 12, run.player.x + mx * speed * dt));
+    run.player.y = Math.max(12, Math.min(wh - 12, run.player.y + my * speed * dt));
+  }
+
   run.waveNum = getRoomWaveNum() || 1;
   run.score = getRoomTotalScore();
 
-  // 2. Re-derive aim angle in world coords (mouseX/Y are canvas pixels).
+  // 3. Aim from mouse in world coords (mouseX/Y are canvas pixels).
   const wm = mpCanvasToWorld(mouseX, mouseY);
   input.aimAngle = Math.atan2(wm.y - run.player.y, wm.x - run.player.x);
   input.aimActive = true;
   run.player.angle = input.aimAngle;
 
+  // 4. Predicted muzzle flash + shoot sound when we're firing locally.
+  mpLocalFireCD = Math.max(0, mpLocalFireCD - dt);
+  if (input.firing && mpLocalFireCD <= 0 && me && !me.dead && me.hp > 0) {
+    const fireRateMul = me?.fireRateMul || 1;
+    mpLocalFireCD = 0.15 / fireRateMul;
+    playSound('shoot');
+    spawnMpParticles({
+      x: run.player.x + Math.cos(input.aimAngle) * 14,
+      y: run.player.y + Math.sin(input.aimAngle) * 14,
+      color: '#00f0ff', count: 4, speed: 120, life: 0.18, size: 2
+    });
+  }
+
+  // 5. Tick the local cosmetic particle system.
+  updateMpParticles(dt);
+
   run.timeElapsed += dt;
 
-  // 3. Forward our input to the server at ~30Hz (server runs at 30Hz too).
+  // 6. Forward input at ~30Hz (server tick rate).
   if (t - lastMpInputAt > 33) {
     lastMpInputAt = t;
     sendInput({
@@ -411,6 +461,52 @@ function mpTick(t, dt) {
       firing: input.firing
     });
   }
+}
+
+// ---- MP local cosmetic particle system ----
+const mpParticles = [];
+const MP_PARTICLE_CAP = 600;
+
+function spawnMpParticles({ x, y, color, count = 8, speed = 200, life = 0.5, size = 2 }) {
+  for (let i = 0; i < count; i++) {
+    if (mpParticles.length >= MP_PARTICLE_CAP) break;
+    const a = Math.random() * Math.PI * 2;
+    const s = speed * (0.4 + Math.random() * 0.9);
+    mpParticles.push({
+      x, y,
+      vx: Math.cos(a) * s,
+      vy: Math.sin(a) * s,
+      life, maxLife: life,
+      color,
+      size: size * (0.7 + Math.random() * 0.8)
+    });
+  }
+}
+
+function updateMpParticles(dt) {
+  for (let i = mpParticles.length - 1; i >= 0; i--) {
+    const p = mpParticles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= 0.92;
+    p.vy *= 0.92;
+    p.life -= dt;
+    if (p.life <= 0) mpParticles.splice(i, 1);
+  }
+}
+
+function drawMpParticles() {
+  if (mpParticles.length === 0) return;
+  ctx.save();
+  for (const p of mpParticles) {
+    const alpha = Math.max(0, p.life / p.maxLife);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur = 6;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.restore();
 }
 
 function mpRender() {
@@ -439,6 +535,8 @@ function mpRender() {
   for (const e of getRemoteEnemies()) drawMpEnemy(e);
   // Projectiles
   for (const p of getRemoteProjectiles()) drawMpProjectile(p);
+  // Cosmetic particles (over enemies, under ships)
+  drawMpParticles();
   // Remote ships (pilots other than me)
   let idx = 0;
   for (const r of getRemotePlayers()) {
@@ -5004,6 +5102,30 @@ document.getElementById('abandonBtn').onclick = () => {
   });
   onWavePhase(() => {
     hideMpUpgradeScreen();
+  });
+
+  // Cosmetic FX broadcasts from the server (enemy death / player hit / boss).
+  onFx((msg) => {
+    if (!run?.isMultiplayer || !msg) return;
+    if (msg.type === 'enemyDeath') {
+      const big = msg.eType === 'warden' || msg.eType === 'miniboss';
+      const color = MP_ENEMY_COLORS[msg.eType] || '#ff2d95';
+      spawnMpParticles({
+        x: msg.x, y: msg.y, color,
+        count: big ? 50 : 18,
+        speed: big ? 380 : 220,
+        life: big ? 0.9 : 0.55,
+        size: big ? 3 : 2
+      });
+      playSound('explosion');
+    } else if (msg.type === 'playerHit') {
+      spawnMpParticles({
+        x: msg.x, y: msg.y, color: '#ff4d6d',
+        count: 14, speed: 200, life: 0.5, size: 2
+      });
+    } else if (msg.type === 'bossSpawn') {
+      playSound('bosswarn');
+    }
   });
 
   // Weekly challenge banner + button on title screen

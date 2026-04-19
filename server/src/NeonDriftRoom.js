@@ -27,12 +27,14 @@ class Player extends Schema {
     this.maxHp = 3;
     this.dead = false;
     this.score = 0;
-    // server-only stats + state (not synced to clients)
+    // Stat multipliers synced so the client can predict movement + fire-rate
+    // for snappy local feel.
+    this.speedMul = 1;
+    this.fireRateMul = 1;
+    // server-only:
     this.fireCD = 0;
     this.iframes = 0;
     this.damageMul = 1;
-    this.fireRateMul = 1;
-    this.speedMul = 1;
     this.magnetMul = 1;
     this.pickedUpgrade = false;
     this.pendingChoices = null;
@@ -48,6 +50,8 @@ type('int16')(Player.prototype, 'hp');
 type('int16')(Player.prototype, 'maxHp');
 type('boolean')(Player.prototype, 'dead');
 type('int32')(Player.prototype, 'score');
+type('float32')(Player.prototype, 'speedMul');
+type('float32')(Player.prototype, 'fireRateMul');
 
 class Enemy extends Schema {
   constructor() {
@@ -406,6 +410,7 @@ class NeonDriftRoom extends Room {
           p.hp -= 1;
           p.iframes = 1.0;
           if (p.hp <= 0) p.dead = true;
+          this.broadcast('fx', { type: 'playerHit', x: p.x, y: p.y });
         }
       });
     });
@@ -432,6 +437,8 @@ class NeonDriftRoom extends Room {
         e.y + (Math.random() - 0.5) * 30
       );
     }
+    // Client uses this to play explosion SFX + spawn particles.
+    this.broadcast('fx', { type: 'enemyDeath', x: e.x, y: e.y, eType: e.type });
   }
 
   spawnPickup(x, y) {
@@ -575,6 +582,7 @@ class NeonDriftRoom extends Room {
       e.x = WORLD_W / 2;
       e.y = -50;
       this.state.enemies.set(String(this.nextEntityId++), e);
+      this.broadcast('fx', { type: 'bossSpawn', eType: e.type, wave: this.state.waveNum });
       return;
     }
     e.type = this.pickEnemyType(this.state.waveNum);
