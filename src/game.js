@@ -372,15 +372,25 @@ function newMpRun(options) {
   document.getElementById('hud').classList.remove('hidden');
 }
 
-// Convert mouse from canvas pixel coords to MP world coords. The MP
-// renderer letterboxes a 1280x720 world into the canvas, so the
-// transform isn't 1:1.
-function mpCanvasToWorld(cx, cy) {
+// Camera state shared by mpRender and mpCanvasToWorld. Fills the canvas
+// completely (Math.max scale) and follows the local player, clamped so the
+// camera never shows past world edges. This matches SP's "world fills the
+// screen" feel rather than the old black-bar letterbox.
+function mpCamera() {
   const { w: ww, h: wh } = getWorldDims();
-  const scale = Math.min(canvas.width / ww, canvas.height / wh);
-  const offX = (canvas.width - ww * scale) / 2;
-  const offY = (canvas.height - wh * scale) / 2;
-  return { x: (cx - offX) / scale, y: (cy - offY) / scale };
+  const scale = Math.max(canvas.width / ww, canvas.height / wh);
+  const viewW = canvas.width / scale;
+  const viewH = canvas.height / scale;
+  const px = (run && run.player) ? run.player.x : ww / 2;
+  const py = (run && run.player) ? run.player.y : wh / 2;
+  const camX = Math.max(0, Math.min(ww - viewW, px - viewW / 2));
+  const camY = Math.max(0, Math.min(wh - viewH, py - viewH / 2));
+  return { ww, wh, scale, camX, camY, viewW, viewH };
+}
+
+function mpCanvasToWorld(cx, cy) {
+  const cam = mpCamera();
+  return { x: cam.camX + cx / cam.scale, y: cam.camY + cy / cam.scale };
 }
 
 // Local muzzle-flash cooldown so we can predict our fire-rate visually
@@ -428,9 +438,15 @@ function mpTick(t, dt) {
   run.waveNum = getRoomWaveNum() || 1;
   run.score = getRoomTotalScore();
 
-  // 3. Aim from mouse in world coords (mouseX/Y are canvas pixels).
-  const wm = mpCanvasToWorld(mouseX, mouseY);
-  input.aimAngle = Math.atan2(wm.y - run.player.y, wm.x - run.player.x);
+  // 3. Aim resolution.
+  //    - touch mode: readInput already set input.aimAngle from the right stick.
+  //      Don't overwrite it (that was the bug — aim got clobbered by mouseX/Y
+  //      which never updates on mobile).
+  //    - kbm / gamepad: compute from mouseX/Y in world coords.
+  if (input.mode !== 'touch') {
+    const wm = mpCanvasToWorld(mouseX, mouseY);
+    input.aimAngle = Math.atan2(wm.y - run.player.y, wm.x - run.player.x);
+  }
   input.aimActive = true;
   run.player.angle = input.aimAngle;
 
@@ -532,18 +548,16 @@ function drawMpParticles() {
 }
 
 function mpRender() {
-  const { w: ww, h: wh } = getWorldDims();
-  const scale = Math.min(canvas.width / ww, canvas.height / wh);
-  const offX = (canvas.width - ww * scale) / 2;
-  const offY = (canvas.height - wh * scale) / 2;
+  const cam = mpCamera();
+  const { ww, wh, scale, camX, camY } = cam;
 
   // Background
   ctx.fillStyle = '#0a0514';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Letterbox transform into world coords
+  // Camera-follow transform: canvas origin maps to (camX, camY) in world.
   ctx.save();
-  ctx.translate(offX, offY);
+  ctx.translate(-camX * scale, -camY * scale);
   ctx.scale(scale, scale);
 
   // World boundary
