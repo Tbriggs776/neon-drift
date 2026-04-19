@@ -130,15 +130,21 @@ export function sendStart() {
   currentRoom?.send('start');
 }
 
-// Broadcast the local player's state to the room. Called at ~20Hz from the
-// game loop while in a started multiplayer run.
+// Phase 8b legacy: broadcast local player position. Phase 8c the server
+// owns position, so this is a no-op when authoritative-sim is in play.
 export function sendPlayerState(payload) {
   if (!currentRoom || !currentRoom.state?.started) return;
   currentRoom.send('playerState', payload);
 }
 
-// Snapshot of other players' positions for the renderer to draw.
-// Returns array of { sessionId, name, x, y, angle, hp, dead, isHost }
+// Phase 8c: send the current input snapshot to the server at ~30Hz.
+// Server runs the sim and writes back authoritative positions/state.
+export function sendInput(payload) {
+  if (!currentRoom || !currentRoom.state?.started) return;
+  currentRoom.send('input', payload);
+}
+
+// Snapshot of other players for rendering. Always reflects server state.
 export function getRemotePlayers() {
   if (!currentRoom || !currentRoom.state) return [];
   const me = currentRoom.sessionId;
@@ -156,6 +162,41 @@ export function getRemotePlayers() {
     });
   });
   return out;
+}
+
+// My own player state from the server (authoritative position, HP, dead).
+export function getMyPlayer() {
+  if (!currentRoom || !currentRoom.state) return null;
+  return currentRoom.state.players.get(currentRoom.sessionId) || null;
+}
+
+export function getRemoteEnemies() {
+  if (!currentRoom || !currentRoom.state) return [];
+  const out = [];
+  currentRoom.state.enemies.forEach((e) => {
+    out.push({ type: e.type, x: e.x, y: e.y, hp: e.hp, maxHp: e.maxHp, r: e.r });
+  });
+  return out;
+}
+
+export function getRemoteProjectiles() {
+  if (!currentRoom || !currentRoom.state) return [];
+  const out = [];
+  currentRoom.state.projectiles.forEach((p) => {
+    out.push({ x: p.x, y: p.y, r: p.r, ownerType: p.ownerType });
+  });
+  return out;
+}
+
+export function getRoomWaveNum() {
+  return currentRoom?.state?.waveNum || 0;
+}
+
+export function getWorldDims() {
+  return {
+    w: currentRoom?.state?.worldW || 1280,
+    h: currentRoom?.state?.worldH || 720
+  };
 }
 
 export function isRunInRoom() {

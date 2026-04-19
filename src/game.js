@@ -46,7 +46,13 @@ import {
   sendSetReady,
   sendStart,
   sendPlayerState,
+  sendInput,
   getRemotePlayers,
+  getRemoteEnemies,
+  getRemoteProjectiles,
+  getMyPlayer,
+  getRoomWaveNum,
+  getWorldDims,
   isRunInRoom
 } from './multiplayer.js';
 
@@ -322,7 +328,232 @@ function getWaveInfo(waveNum) {
 
 let run = null;
 
+// ============================================================
+// Phase 8c: multiplayer run uses server-authoritative simulation.
+// Client just renders server state and forwards input. Single-player
+// code path is intentionally untouched — this is a parallel system.
+// ============================================================
+const MP_REMOTE_COLORS = ['#39ff14', '#ffea00', '#bc8cff'];
+
+function newMpRun(options) {
+  const runSeed = options.seed || 0;
+  setRandomSeed(runSeed);
+  startBGM();
+  // Minimal `run` shape — the MP renderer is self-contained but a few
+  // bits (HUD, pause behavior) read from `run` directly.
+  run = {
+    active: true,
+    paused: false,
+    isMultiplayer: true,
+    waveNum: 1,
+    score: 0,
+    cores: 0,
+    timeElapsed: 0,
+    seed: runSeed,
+    player: {
+      x: 640, y: 360, angle: 0,
+      hp: 3, maxHp: 3, r: 12,
+      iframes: 0, invulnDash: 0, dashCD: 0, dashMax: 1,
+      bank: 0, enginePulse: 0, trail: []
+    },
+    enemies: [], projectiles: [], particles: [],
+    pickups: [], powerupDrops: [], drones: [],
+    turrets: [], medics: [], snakeTurrets: [], snakes: []
+  };
+  document.getElementById('hud').classList.remove('hidden');
+}
+
+// Convert mouse from canvas pixel coords to MP world coords. The MP
+// renderer letterboxes a 1280x720 world into the canvas, so the
+// transform isn't 1:1.
+function mpCanvasToWorld(cx, cy) {
+  const { w: ww, h: wh } = getWorldDims();
+  const scale = Math.min(canvas.width / ww, canvas.height / wh);
+  const offX = (canvas.width - ww * scale) / 2;
+  const offY = (canvas.height - wh * scale) / 2;
+  return { x: (cx - offX) / scale, y: (cy - offY) / scale };
+}
+
+function mpTick(t, dt) {
+  // 1. Pull authoritative state from server into `run` so HUD code keeps working.
+  const me = getMyPlayer();
+  if (me) {
+    run.player.x = me.x;
+    run.player.y = me.y;
+    run.player.hp = me.hp;
+  }
+  run.waveNum = getRoomWaveNum() || 1;
+
+  // 2. Re-derive aim angle in world coords (mouseX/Y are canvas pixels).
+  const wm = mpCanvasToWorld(mouseX, mouseY);
+  input.aimAngle = Math.atan2(wm.y - run.player.y, wm.x - run.player.x);
+  input.aimActive = true;
+  run.player.angle = input.aimAngle;
+
+  run.timeElapsed += dt;
+
+  // 3. Forward our input to the server at ~30Hz (server runs at 30Hz too).
+  if (t - lastMpInputAt > 33) {
+    lastMpInputAt = t;
+    sendInput({
+      moveX: input.moveX,
+      moveY: input.moveY,
+      aimAngle: input.aimAngle,
+      firing: input.firing
+    });
+  }
+}
+
+function mpRender() {
+  const { w: ww, h: wh } = getWorldDims();
+  const scale = Math.min(canvas.width / ww, canvas.height / wh);
+  const offX = (canvas.width - ww * scale) / 2;
+  const offY = (canvas.height - wh * scale) / 2;
+
+  // Background
+  ctx.fillStyle = '#0a0514';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Letterbox transform into world coords
+  ctx.save();
+  ctx.translate(offX, offY);
+  ctx.scale(scale, scale);
+
+  // World boundary
+  ctx.strokeStyle = 'rgba(184, 71, 255, 0.4)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(0, 0, ww, wh);
+
+  // Enemies
+  for (const e of getRemoteEnemies()) drawMpEnemy(e);
+  // Projectiles
+  for (const p of getRemoteProjectiles()) drawMpProjectile(p);
+  // Remote ships (pilots other than me)
+  let idx = 0;
+  for (const r of getRemotePlayers()) {
+    drawMpRemoteShip(r, MP_REMOTE_COLORS[idx % MP_REMOTE_COLORS.length]);
+    idx++;
+  }
+  // Local ship (drawn last so it sits on top)
+  const me = getMyPlayer();
+  if (me && !me.dead) drawMpLocalShip(me);
+  else if (me?.dead) drawMpDeadOverlay();
+
+  ctx.restore();
+
+  // HUD (canvas pixel coords)
+  if (typeof updateHUD === 'function') {
+    try { updateHUD(); } catch (e) { /* ignore */ }
+  }
+}
+
+function drawMpEnemy(e) {
+  ctx.save();
+  ctx.translate(e.x, e.y);
+  ctx.shadowColor = '#ff2d95';
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = '#ff2d95';
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(0, 0, e.r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  // HP bar above
+  if (e.hp < e.maxHp) {
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(-e.r, -e.r - 8, e.r * 2, 4);
+    ctx.fillStyle = '#ffea00';
+    ctx.fillRect(-e.r, -e.r - 8, e.r * 2 * (e.hp / e.maxHp), 4);
+  }
+  ctx.restore();
+}
+
+function drawMpProjectile(p) {
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  const color = p.ownerType === 'player' ? '#00f0ff' : '#ff4d6d';
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 10;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(0, 0, p.r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawMpLocalShip(me) {
+  ctx.save();
+  ctx.translate(me.x, me.y);
+  ctx.rotate(me.angle || 0);
+  ctx.shadowColor = '#ff2d95';
+  ctx.shadowBlur = 18;
+  ctx.fillStyle = 'rgba(10, 5, 20, 0.7)';
+  ctx.strokeStyle = '#ff2d95';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(14, 0);
+  ctx.lineTo(-10, -10);
+  ctx.lineTo(-6, 0);
+  ctx.lineTo(-10, 10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawMpRemoteShip(r, color) {
+  if (r.dead) return;
+  ctx.save();
+  ctx.translate(r.x, r.y);
+  ctx.rotate(r.angle || 0);
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 14;
+  ctx.fillStyle = 'rgba(10, 5, 20, 0.6)';
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(12, 0);
+  ctx.lineTo(-8, -8);
+  ctx.lineTo(-5, 0);
+  ctx.lineTo(-8, 8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.font = '11px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#000';
+  ctx.shadowBlur = 4;
+  ctx.fillText(r.name || 'pilot', r.x, r.y - 18);
+  ctx.restore();
+}
+
+function drawMpDeadOverlay() {
+  // Draw a "DRIFTED" banner in the world layer over the map center.
+  ctx.save();
+  ctx.fillStyle = 'rgba(255, 77, 109, 0.9)';
+  ctx.font = 'bold 64px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#ff4d6d';
+  ctx.shadowBlur = 30;
+  ctx.fillText('DRIFTED', 640, 360);
+  ctx.font = '14px "Courier New", monospace';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('Spectating teammates · Pause to leave', 640, 400);
+  ctx.restore();
+}
+
 function newRun(options = {}) {
+  // Phase 8c: multiplayer runs use a separate code path with the server-
+  // authoritative simulation. Single-player path below is untouched.
+  if (options.isMultiplayer) {
+    newMpRun(options);
+    return;
+  }
   const runSeed = options.seed !== undefined
     ? options.seed
     : Math.floor(Math.random() * 0x7fffffff);
@@ -1444,25 +1675,22 @@ function loop(t) {
   // Always poll input so gamepad pause toggle works even when paused
   readInput();
   if (run && run.active && !run.paused) {
-    update(dt * run.slowmo);
-    // Slowmo recovery
-    if (run.slowmo < 1) run.slowmo = Math.min(1, run.slowmo + dt * 0.8);
-    // Broadcast our position to roommates at ~20Hz
-    if (isRunInRoom() && t - lastMpBroadcastAt > 50) {
-      lastMpBroadcastAt = t;
-      sendPlayerState({
-        x: run.player.x,
-        y: run.player.y,
-        angle: run.player.angle,
-        hp: run.player.hp,
-        dead: run.player.hp <= 0
-      });
+    if (run.isMultiplayer) {
+      mpTick(t, dt);
+    } else {
+      update(dt * run.slowmo);
+      // Slowmo recovery
+      if (run.slowmo < 1) run.slowmo = Math.min(1, run.slowmo + dt * 0.8);
     }
   }
-  render();
+  if (run && run.isMultiplayer) {
+    mpRender();
+  } else {
+    render();
+  }
   requestAnimationFrame(loop);
 }
-let lastMpBroadcastAt = 0;
+let lastMpInputAt = 0;
 requestAnimationFrame(loop);
 
 function update(dt) {
@@ -4369,6 +4597,11 @@ document.getElementById('leaveShopBtn').onclick = () => {
 };
 document.getElementById('resumeBtn').onclick = togglePause;
 document.getElementById('abandonBtn').onclick = () => {
+  // If we're in a multiplayer run, leave the Colyseus room so other clients
+  // see us depart and we don't keep an orphan session open.
+  if (run?.isMultiplayer) {
+    leaveRoom().catch(() => {});
+  }
   if (run) { run.active = false; }
   stopBGM();
   hideAll();
@@ -4641,9 +4874,9 @@ document.getElementById('abandonBtn').onclick = () => {
 
   onMultiplayerChange(renderMpState);
   onGameStart(({ seed }) => {
-    // Server picked the seed; run on every client with same seed.
+    // Server runs the authoritative simulation; client renders state + sends input.
     hideAll();
-    newRun({ seed });
+    newRun({ seed, isMultiplayer: true });
   });
 
   // Weekly challenge banner + button on title screen
