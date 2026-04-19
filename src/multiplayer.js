@@ -26,6 +26,8 @@ export function getCurrentRoom() { return currentRoom; }
 const listeners = new Set();
 const gameStartListeners = new Set();
 const gameEndListeners = new Set();
+const upgradeChoicesListeners = new Set();
+const wavePhaseListeners = new Set();
 
 function snapshot() {
   if (!currentRoom || !currentRoom.state) {
@@ -71,6 +73,16 @@ export function onGameEnd(fn) {
   return () => gameEndListeners.delete(fn);
 }
 
+export function onUpgradeChoices(fn) {
+  upgradeChoicesListeners.add(fn);
+  return () => upgradeChoicesListeners.delete(fn);
+}
+
+export function onWavePhase(fn) {
+  wavePhaseListeners.add(fn);
+  return () => wavePhaseListeners.delete(fn);
+}
+
 function wireRoom(room) {
   currentRoom = room;
   room.onStateChange(() => emit());
@@ -91,6 +103,16 @@ function wireRoom(room) {
   room.onMessage('gameEnd', (msg) => {
     for (const fn of gameEndListeners) {
       try { fn(msg); } catch (e) { console.warn(e); }
+    }
+  });
+  room.onMessage('upgradeChoices', (msg) => {
+    for (const fn of upgradeChoicesListeners) {
+      try { fn(msg); } catch (e) { console.warn(e); }
+    }
+  });
+  room.onMessage('wavePhase', () => {
+    for (const fn of wavePhaseListeners) {
+      try { fn(); } catch (e) { console.warn(e); }
     }
   });
   emit();
@@ -141,6 +163,10 @@ export function sendStart() {
   currentRoom?.send('start');
 }
 
+export function sendPickUpgrade(id) {
+  currentRoom?.send('pickUpgrade', { id });
+}
+
 // Phase 8b legacy: broadcast local player position. Phase 8c the server
 // owns position, so this is a no-op when authoritative-sim is in play.
 export function sendPlayerState(payload) {
@@ -179,6 +205,10 @@ export function getRemotePlayers() {
 export function getMyPlayer() {
   if (!currentRoom || !currentRoom.state) return null;
   return currentRoom.state.players.get(currentRoom.sessionId) || null;
+}
+
+export function getMyScore() {
+  return getMyPlayer()?.score || 0;
 }
 
 export function getRemoteEnemies() {

@@ -27,9 +27,15 @@ class Player extends Schema {
     this.maxHp = 3;
     this.dead = false;
     this.score = 0;
-    // server-only:
+    // server-only stats + state (not synced to clients)
     this.fireCD = 0;
     this.iframes = 0;
+    this.damageMul = 1;
+    this.fireRateMul = 1;
+    this.speedMul = 1;
+    this.magnetMul = 1;
+    this.pickedUpgrade = false;
+    this.pendingChoices = null;
   }
 }
 type('string')(Player.prototype, 'name');
@@ -143,6 +149,33 @@ function generateCode() {
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+// Upgrade pool — stat-only, no special abilities. Each pick is per-player.
+const UPGRADE_POOL = [
+  { id: 'damage',   name: 'OVERCHARGE',       desc: '+20% damage' },
+  { id: 'fireRate', name: 'RAPID CYCLER',     desc: '+25% fire rate' },
+  { id: 'maxHp',    name: 'REINFORCED HULL',  desc: '+1 max HP (full heal)' },
+  { id: 'speed',    name: 'PHASE DRIVE',      desc: '+15% move speed' },
+  { id: 'magnet',   name: 'CORE MAGNET',      desc: '+60% pickup radius' }
+];
+
+function pickRandomUpgrades(n) {
+  const shuffled = [...UPGRADE_POOL].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, n).map((u) => ({ id: u.id, name: u.name, desc: u.desc }));
+}
+
+function applyUpgrade(player, choice) {
+  switch (choice.id) {
+    case 'damage':   player.damageMul   = (player.damageMul   || 1) + 0.20; break;
+    case 'fireRate': player.fireRateMul = (player.fireRateMul || 1) + 0.25; break;
+    case 'maxHp':    player.maxHp += 1; player.hp = player.maxHp; break;
+    case 'speed':    player.speedMul    = (player.speedMul    || 1) + 0.15; break;
+    case 'magnet':   player.magnetMul   = (player.magnetMul   || 1) + 0.60; break;
+  }
+}
+
+function isBossWave(num)   { return num > 0 && num % 5 === 0; }
+function isWardenWave(num) { return num > 0 && num % 10 === 0; }
+
 // ============================================================
 // Room — lobby + authoritative simulation
 // ============================================================
@@ -158,8 +191,9 @@ class NeonDriftRoom extends Room {
     this.setPatchRate(1000 / TICK_HZ);
 
     this.playerInput = new Map(); // sessionId -> { moveX, moveY, aimAngle, firing }
-    this.spawn = { active: false, remaining: 0, betweenSpawns: 0 };
+    this.spawn = { active: false, remaining: 0, betweenSpawns: 0, boss: false };
     this.nextEntityId = 1;
+    this.upgradePhase = false;
 
     this.onMessage('setName', (client, name) => {
       const p = this.state.players.get(client.sessionId);
@@ -183,6 +217,18 @@ class NeonDriftRoom extends Room {
       });
     });
 
+    this.onMessage('pickUpgrade', (client, payload) => {
+      if (!this.upgradePhase) return;
+      const p = this.state.players.get(client.sessionId);
+      if (!p || p.dead || p.pickedUpgrade) return;
+      const choice = (p.pendingChoices || []).find((c) => c.id === payload?.id);
+      if (!choice) return;
+      applyUpgrade(p, choice);
+      p.pickedUpgrade = true;
+      p.pendingChoices = null;
+      this.maybeEndUpgradePhase();
+    });
+
     this.onMessage('start', (client) => {
       const p = this.state.players.get(client.sessionId);
       if (!p || !p.isHost || this.state.started) return;
@@ -201,12 +247,21 @@ class NeonDriftRoom extends Room {
       this.state.players.forEach((pl) => {
         pl.x = WORLD_W / 2 + (Math.random() - 0.5) * 80;
         pl.y = WORLD_H / 2 + (Math.random() - 0.5) * 80;
+        pl.maxHp = 3;
         pl.hp = pl.maxHp;
         pl.dead = false;
         pl.iframes = 0;
         pl.fireCD = 0;
         pl.score = 0;
+        // Reset per-run stat multipliers
+        pl.damageMul = 1;
+        pl.fireRateMul = 1;
+        pl.speedMul = 1;
+        pl.magnetMul = 1;
+        pl.pickedUpgrade = false;
+        pl.pendingChoices = null;
       });
+      this.upgradePhase = false;
       this.startWave(1);
       this.broadcast('gameStart', { seed: this.state.seed });
       this.lock();
@@ -232,6 +287,9 @@ class NeonDriftRoom extends Room {
       const next = this.state.players.values().next().value;
       if (next) next.isHost = true;
     }
+    // If the leaver was the only one we were waiting on for an upgrade pick,
+    // unblock the run.
+    if (this.upgradePhase) this.maybeEndUpgradePhase();
   }
 
   // ----------------------------------------------------------
@@ -239,6 +297,7 @@ class NeonDriftRoom extends Room {
   // ----------------------------------------------------------
   tick(dt) {
     if (!this.state.started || this.state.gameOver) return;
+    if (this.upgradePhase) return; // sim is paused while pilots pick upgrades
     this.updatePlayers(dt);
     this.updateEnemies(dt);
     this.updateProjectiles(dt);
@@ -249,23 +308,25 @@ class NeonDriftRoom extends Room {
   }
 
   updatePlayers(dt) {
-    const SPEED = 240;
+    const BASE_SPEED = 240;
+    const BASE_FIRE_CD = 0.15;
     this.state.players.forEach((p, sid) => {
       if (p.iframes > 0) p.iframes = Math.max(0, p.iframes - dt);
       p.fireCD = Math.max(0, (p.fireCD || 0) - dt);
       if (p.dead) return;
       const inp = this.playerInput.get(sid);
       if (!inp) return;
-      // Movement
+      // Movement (with speed upgrade)
       let mx = inp.moveX, my = inp.moveY;
       const mag = Math.hypot(mx, my);
       if (mag > 1) { mx /= mag; my /= mag; }
-      p.x = clamp(p.x + mx * SPEED * dt, 12, WORLD_W - 12);
-      p.y = clamp(p.y + my * SPEED * dt, 12, WORLD_H - 12);
+      const speed = BASE_SPEED * (p.speedMul || 1);
+      p.x = clamp(p.x + mx * speed * dt, 12, WORLD_W - 12);
+      p.y = clamp(p.y + my * speed * dt, 12, WORLD_H - 12);
       p.angle = inp.aimAngle;
-      // Fire
+      // Fire (with fire-rate upgrade — divides cooldown)
       if (inp.firing && p.fireCD <= 0) {
-        p.fireCD = 0.15;
+        p.fireCD = BASE_FIRE_CD / (p.fireRateMul || 1);
         this.spawnPlayerProjectile(p, sid);
       }
     });
@@ -351,18 +412,24 @@ class NeonDriftRoom extends Room {
   }
 
   onEnemyKilled(e, killerSid) {
-    const points = e.type === 'weaver' ? 30 : e.type === 'drifter' ? 20 : 10;
+    const points =
+      e.type === 'warden'   ? 1000 :
+      e.type === 'miniboss' ? 300  :
+      e.type === 'weaver'   ? 30   :
+      e.type === 'drifter'  ? 20   : 10;
     this.state.totalScore += points;
     if (killerSid) {
       const killer = this.state.players.get(killerSid);
       if (killer) killer.score += points;
     }
-    // Drop a core (occasionally two for tougher enemies)
-    const cores = e.type === 'weaver' ? 2 : 1;
+    const cores =
+      e.type === 'warden'   ? 30 :
+      e.type === 'miniboss' ? 8  :
+      e.type === 'weaver'   ? 2  : 1;
     for (let i = 0; i < cores; i++) {
       this.spawnPickup(
-        e.x + (Math.random() - 0.5) * 20,
-        e.y + (Math.random() - 0.5) * 20
+        e.x + (Math.random() - 0.5) * 30,
+        e.y + (Math.random() - 0.5) * 30
       );
     }
   }
@@ -378,8 +445,9 @@ class NeonDriftRoom extends Room {
     this.state.pickups.forEach((pk, id) => {
       this.state.players.forEach((p) => {
         if (p.dead) return;
+        const radius = 16 * (p.magnetMul || 1);
         const dx = pk.x - p.x, dy = pk.y - p.y;
-        const rr = (16 + pk.r);
+        const rr = (radius + pk.r);
         if (dx * dx + dy * dy < rr * rr) {
           p.score += pk.value;
           this.state.totalScore += pk.value;
@@ -408,14 +476,18 @@ class NeonDriftRoom extends Room {
   // ----------------------------------------------------------
   startWave(num) {
     this.state.waveNum = num;
-    // Auto-heal +1 HP between waves (capped at maxHp). Skipped on wave 1.
     if (num > 1) {
       this.state.players.forEach((p) => {
         if (!p.dead) p.hp = Math.min(p.maxHp, p.hp + 1);
       });
     }
-    const count = 5 + num * 2;
-    this.spawn = { active: true, remaining: count, betweenSpawns: 0 };
+    if (isBossWave(num)) {
+      // Boss waves spawn one tougher enemy. No swarm.
+      this.spawn = { active: true, remaining: 1, betweenSpawns: 0, boss: true };
+    } else {
+      const count = 5 + num * 2;
+      this.spawn = { active: true, remaining: count, betweenSpawns: 0, boss: false };
+    }
   }
 
   pickEnemyType(num) {
@@ -431,9 +503,9 @@ class NeonDriftRoom extends Room {
 
   updateSpawning(dt) {
     if (!this.spawn.active) {
-      // Wave clear when all enemies are dead AND we're not actively spawning
+      // Wave cleared when all enemies are dead AND we're not actively spawning
       if (this.state.enemies.size === 0) {
-        this.startWave(this.state.waveNum + 1);
+        this.startUpgradePhase();
       }
       return;
     }
@@ -448,8 +520,63 @@ class NeonDriftRoom extends Room {
     }
   }
 
+  startUpgradePhase() {
+    const alive = [];
+    this.state.players.forEach((p, sid) => { if (!p.dead) alive.push([p, sid]); });
+    if (alive.length === 0) {
+      // Should be unreachable — checkGameOver runs every tick — but be safe.
+      this.startWave(this.state.waveNum + 1);
+      return;
+    }
+    this.upgradePhase = true;
+    for (const [p] of alive) {
+      p.pickedUpgrade = false;
+      p.pendingChoices = pickRandomUpgrades(3);
+    }
+    // Send each alive player their per-player choices.
+    this.clients.forEach((client) => {
+      const p = this.state.players.get(client.sessionId);
+      if (p && p.pendingChoices) {
+        client.send('upgradeChoices', { choices: p.pendingChoices });
+      }
+    });
+  }
+
+  maybeEndUpgradePhase() {
+    if (!this.upgradePhase) return;
+    let allPicked = true;
+    this.state.players.forEach((pl) => {
+      if (!pl.dead && !pl.pickedUpgrade) allPicked = false;
+    });
+    if (allPicked) {
+      this.upgradePhase = false;
+      this.broadcast('wavePhase');
+      this.startWave(this.state.waveNum + 1);
+    }
+  }
+
   spawnEnemy() {
     const e = new Enemy();
+    if (this.spawn.boss) {
+      // Boss waves: warden every 10, miniboss otherwise.
+      if (isWardenWave(this.state.waveNum)) {
+        e.type = 'warden';
+        e.maxHp = 200 + this.state.waveNum * 12;
+        e.speed = 50;
+        e.r = 36;
+      } else {
+        e.type = 'miniboss';
+        e.maxHp = 60 + this.state.waveNum * 8;
+        e.speed = 60;
+        e.r = 24;
+      }
+      e.hp = e.maxHp;
+      // Bosses enter from top center for drama.
+      e.x = WORLD_W / 2;
+      e.y = -50;
+      this.state.enemies.set(String(this.nextEntityId++), e);
+      return;
+    }
     e.type = this.pickEnemyType(this.state.waveNum);
     if (e.type === 'drifter') {
       e.maxHp = 2 + this.state.waveNum;
@@ -485,7 +612,7 @@ class NeonDriftRoom extends Room {
     proj.vx = Math.cos(player.angle) * 600;
     proj.vy = Math.sin(player.angle) * 600;
     proj.life = 1.5;
-    proj.damage = 1;
+    proj.damage = 1 * (player.damageMul || 1);
     this.state.projectiles.set(String(this.nextEntityId++), proj);
   }
 }

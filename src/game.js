@@ -41,11 +41,14 @@ import {
   onMultiplayerChange,
   onGameStart,
   onGameEnd,
+  onUpgradeChoices,
+  onWavePhase,
   createRoom,
   joinRoomByCode,
   leaveRoom,
   sendSetReady,
   sendStart,
+  sendPickUpgrade,
   sendPlayerState,
   sendInput,
   getRemotePlayers,
@@ -54,6 +57,7 @@ import {
   getRemotePickups,
   getRoomTotalScore,
   getMyPlayer,
+  getMyScore,
   getRoomWaveNum,
   getWorldDims,
   isRunInRoom
@@ -457,7 +461,9 @@ function mpRender() {
 const MP_ENEMY_COLORS = {
   grunt: '#ff2d95',
   drifter: '#00f0ff',
-  weaver: '#ffea00'
+  weaver: '#ffea00',
+  miniboss: '#bc8cff',
+  warden: '#ff4d6d'
 };
 
 function drawMpEnemy(e) {
@@ -577,6 +583,38 @@ function drawMpDeadOverlay() {
   ctx.fillText('Spectating teammates · Pause to leave', 640, 400);
   ctx.restore();
 }
+
+// MP upgrade modal — shown when server signals upgradeChoices.
+function showMpUpgradeScreen(choices) {
+  const overlay = document.getElementById('mpUpgradeScreen');
+  const list = document.getElementById('mpUpgradeChoices');
+  const waiting = document.getElementById('mpUpgradeWaiting');
+  if (!overlay || !list) return;
+  list.innerHTML = choices.map((c) => `
+    <button class="btn secondary" data-mp-upgrade-id="${c.id}" style="text-align: left; padding: 12px 16px;">
+      <div style="font-weight: bold; color: var(--cyan);">${c.name}</div>
+      <div class="dim" style="font-size: 12px; margin-top: 2px;">${c.desc}</div>
+    </button>
+  `).join('');
+  if (waiting) waiting.textContent = '';
+  overlay.classList.remove('hidden');
+}
+function hideMpUpgradeScreen() {
+  document.getElementById('mpUpgradeScreen')?.classList.add('hidden');
+}
+// Click delegation for upgrade pick buttons.
+document.addEventListener('click', (e) => {
+  const target = e.target;
+  if (!(target instanceof HTMLElement)) return;
+  const btn = target.closest('[data-mp-upgrade-id]');
+  if (!btn) return;
+  const id = btn.getAttribute('data-mp-upgrade-id');
+  // Disable all buttons; show waiting hint.
+  document.querySelectorAll('[data-mp-upgrade-id]').forEach((b) => { b.disabled = true; });
+  const waiting = document.getElementById('mpUpgradeWaiting');
+  if (waiting) waiting.textContent = 'Waiting for other pilots...';
+  sendPickUpgrade(id);
+});
 
 function newRun(options = {}) {
   // Phase 8c: multiplayer runs use a separate code path with the server-
@@ -4930,7 +4968,6 @@ document.getElementById('abandonBtn').onclick = () => {
 
   onGameEnd(({ totalScore, waveReached }) => {
     if (!run?.isMultiplayer) return;
-    // Reuse the existing death overlay with MP-appropriate copy.
     run.active = false;
     stopBGM();
     hideAll();
@@ -4942,6 +4979,31 @@ document.getElementById('abandonBtn').onclick = () => {
     document.getElementById('dsCombo').textContent = '—';
     document.getElementById('dsBanked').textContent = '0';
     document.getElementById('deathScreen').classList.remove('hidden');
+    // Submit MY personal score to the leaderboard. Anon submissions still
+    // work; signed-in submissions get attributed to the user_id.
+    const personal = getMyScore();
+    if (personal > 0 && waveReached > 0) {
+      submitScore({
+        wave: waveReached,
+        score: personal,
+        bestCombo: 0,
+        cores: 0,
+        runDurationMs: Math.round((run.timeElapsed || 0) * 1000),
+        upgrades: []
+      }).then((res) => {
+        const sub = document.getElementById('deathSubtitle');
+        if (res?.success) sub.textContent = sub.textContent + ' · Score saved';
+      }).catch(() => {});
+    }
+  });
+
+  // Upgrade pick flow during multiplayer runs
+  onUpgradeChoices(({ choices }) => {
+    if (!run?.isMultiplayer) return;
+    showMpUpgradeScreen(choices || []);
+  });
+  onWavePhase(() => {
+    hideMpUpgradeScreen();
   });
 
   // Weekly challenge banner + button on title screen
