@@ -24,11 +24,12 @@ class Player extends Schema {
     this.y = WORLD_H / 2;
     this.angle = 0;
     this.hp = 3;
+    this.maxHp = 3;
     this.dead = false;
+    this.score = 0;
     // server-only:
     this.fireCD = 0;
     this.iframes = 0;
-    this.maxHp = 3;
   }
 }
 type('string')(Player.prototype, 'name');
@@ -38,7 +39,9 @@ type('float32')(Player.prototype, 'x');
 type('float32')(Player.prototype, 'y');
 type('float32')(Player.prototype, 'angle');
 type('int16')(Player.prototype, 'hp');
+type('int16')(Player.prototype, 'maxHp');
 type('boolean')(Player.prototype, 'dead');
+type('int32')(Player.prototype, 'score');
 
 class Enemy extends Schema {
   constructor() {
@@ -72,6 +75,7 @@ class Projectile extends Schema {
     this.vy = 0;
     this.life = 1.5;
     this.damage = 1;
+    this.ownerId = ''; // sessionId of the player who fired (for score)
   }
 }
 type('float32')(Projectile.prototype, 'x');
@@ -79,29 +83,50 @@ type('float32')(Projectile.prototype, 'y');
 type('float32')(Projectile.prototype, 'r');
 type('string')(Projectile.prototype, 'ownerType');
 
+// Cores dropped on enemy death; collected on player overlap.
+class Pickup extends Schema {
+  constructor() {
+    super();
+    this.x = 0;
+    this.y = 0;
+    this.r = 8;
+    this.value = 1;
+  }
+}
+type('float32')(Pickup.prototype, 'x');
+type('float32')(Pickup.prototype, 'y');
+type('float32')(Pickup.prototype, 'r');
+type('int16')(Pickup.prototype, 'value');
+
 class RoomState extends Schema {
   constructor() {
     super();
     this.code = '';
     this.started = false;
+    this.gameOver = false;
     this.seed = 0;
     this.waveNum = 0;
+    this.totalScore = 0;
     this.worldW = WORLD_W;
     this.worldH = WORLD_H;
     this.players = new MapSchema();
     this.enemies = new MapSchema();
     this.projectiles = new MapSchema();
+    this.pickups = new MapSchema();
   }
 }
 type('string')(RoomState.prototype, 'code');
 type('boolean')(RoomState.prototype, 'started');
+type('boolean')(RoomState.prototype, 'gameOver');
 type('int32')(RoomState.prototype, 'seed');
 type('int16')(RoomState.prototype, 'waveNum');
+type('int32')(RoomState.prototype, 'totalScore');
 type('int16')(RoomState.prototype, 'worldW');
 type('int16')(RoomState.prototype, 'worldH');
 type({ map: Player })(RoomState.prototype, 'players');
 type({ map: Enemy })(RoomState.prototype, 'enemies');
 type({ map: Projectile })(RoomState.prototype, 'projectiles');
+type({ map: Pickup })(RoomState.prototype, 'pickups');
 
 // ============================================================
 // Helpers
@@ -167,9 +192,12 @@ class NeonDriftRoom extends Room {
       if (!allReady) return;
       this.state.seed = Math.floor(Math.random() * 0x7fffffff);
       this.state.started = true;
+      this.state.gameOver = false;
+      this.state.totalScore = 0;
       // Reset gameplay state for the run.
       this.state.enemies.clear();
       this.state.projectiles.clear();
+      this.state.pickups.clear();
       this.state.players.forEach((pl) => {
         pl.x = WORLD_W / 2 + (Math.random() - 0.5) * 80;
         pl.y = WORLD_H / 2 + (Math.random() - 0.5) * 80;
@@ -177,6 +205,7 @@ class NeonDriftRoom extends Room {
         pl.dead = false;
         pl.iframes = 0;
         pl.fireCD = 0;
+        pl.score = 0;
       });
       this.startWave(1);
       this.broadcast('gameStart', { seed: this.state.seed });
@@ -209,12 +238,14 @@ class NeonDriftRoom extends Room {
   // Simulation tick (30Hz)
   // ----------------------------------------------------------
   tick(dt) {
-    if (!this.state.started) return;
+    if (!this.state.started || this.state.gameOver) return;
     this.updatePlayers(dt);
     this.updateEnemies(dt);
     this.updateProjectiles(dt);
-    this.collisions();
+    this.collisions(dt);
+    this.collectPickups();
     this.updateSpawning(dt);
+    this.checkGameOver();
   }
 
   updatePlayers(dt) {
@@ -235,7 +266,7 @@ class NeonDriftRoom extends Room {
       // Fire
       if (inp.firing && p.fireCD <= 0) {
         p.fireCD = 0.15;
-        this.spawnPlayerProjectile(p);
+        this.spawnPlayerProjectile(p, sid);
       }
     });
   }
@@ -250,10 +281,18 @@ class NeonDriftRoom extends Room {
         const d = Math.hypot(p.x - e.x, p.y - e.y);
         if (d < bestDist) { bestDist = d; target = p; }
       });
-      if (target) {
-        const dx = target.x - e.x;
-        const dy = target.y - e.y;
-        const mag = Math.hypot(dx, dy) || 1;
+      if (!target) return;
+      const dx = target.x - e.x;
+      const dy = target.y - e.y;
+      const mag = Math.hypot(dx, dy) || 1;
+      if (e.type === 'weaver') {
+        // Weaver moves toward target with a sinusoidal perpendicular wobble
+        e.weaveT = (e.weaveT || 0) + dt;
+        const px = -dy / mag, py = dx / mag;
+        const wobble = Math.sin(e.weaveT * 4) * 60 * (e.weaveDir || 1);
+        e.x += (dx / mag) * e.speed * dt + px * wobble * dt;
+        e.y += (dy / mag) * e.speed * dt + py * wobble * dt;
+      } else {
         e.x += (dx / mag) * e.speed * dt;
         e.y += (dy / mag) * e.speed * dt;
       }
@@ -273,7 +312,7 @@ class NeonDriftRoom extends Room {
     for (const id of dead) this.state.projectiles.delete(id);
   }
 
-  collisions() {
+  collisions(dt) {
     // Player projectiles vs enemies
     const projDeath = new Set();
     const enemyDeath = new Set();
@@ -286,7 +325,10 @@ class NeonDriftRoom extends Room {
         if (dx * dx + dy * dy < rr * rr) {
           e.hp -= proj.damage;
           projDeath.add(projId);
-          if (e.hp <= 0) enemyDeath.add(eId);
+          if (e.hp <= 0) {
+            enemyDeath.add(eId);
+            this.onEnemyKilled(e, proj.ownerId);
+          }
         }
       });
     });
@@ -308,13 +350,83 @@ class NeonDriftRoom extends Room {
     });
   }
 
+  onEnemyKilled(e, killerSid) {
+    const points = e.type === 'weaver' ? 30 : e.type === 'drifter' ? 20 : 10;
+    this.state.totalScore += points;
+    if (killerSid) {
+      const killer = this.state.players.get(killerSid);
+      if (killer) killer.score += points;
+    }
+    // Drop a core (occasionally two for tougher enemies)
+    const cores = e.type === 'weaver' ? 2 : 1;
+    for (let i = 0; i < cores; i++) {
+      this.spawnPickup(
+        e.x + (Math.random() - 0.5) * 20,
+        e.y + (Math.random() - 0.5) * 20
+      );
+    }
+  }
+
+  spawnPickup(x, y) {
+    const p = new Pickup();
+    p.x = x; p.y = y; p.r = 8; p.value = 1;
+    this.state.pickups.set(String(this.nextEntityId++), p);
+  }
+
+  collectPickups() {
+    const picked = [];
+    this.state.pickups.forEach((pk, id) => {
+      this.state.players.forEach((p) => {
+        if (p.dead) return;
+        const dx = pk.x - p.x, dy = pk.y - p.y;
+        const rr = (16 + pk.r);
+        if (dx * dx + dy * dy < rr * rr) {
+          p.score += pk.value;
+          this.state.totalScore += pk.value;
+          picked.push(id);
+        }
+      });
+    });
+    for (const id of picked) this.state.pickups.delete(id);
+  }
+
+  checkGameOver() {
+    if (this.state.gameOver || this.state.players.size === 0) return;
+    let anyAlive = false;
+    this.state.players.forEach((p) => { if (!p.dead) anyAlive = true; });
+    if (!anyAlive) {
+      this.state.gameOver = true;
+      this.broadcast('gameEnd', {
+        totalScore: this.state.totalScore,
+        waveReached: this.state.waveNum
+      });
+    }
+  }
+
   // ----------------------------------------------------------
   // Wave spawning (simplified for 8c session 1)
   // ----------------------------------------------------------
   startWave(num) {
     this.state.waveNum = num;
+    // Auto-heal +1 HP between waves (capped at maxHp). Skipped on wave 1.
+    if (num > 1) {
+      this.state.players.forEach((p) => {
+        if (!p.dead) p.hp = Math.min(p.maxHp, p.hp + 1);
+      });
+    }
     const count = 5 + num * 2;
     this.spawn = { active: true, remaining: count, betweenSpawns: 0 };
+  }
+
+  pickEnemyType(num) {
+    if (num < 3) return 'grunt';
+    const r = Math.random();
+    if (num >= 5) {
+      if (r < 0.4) return 'grunt';
+      if (r < 0.75) return 'drifter';
+      return 'weaver';
+    }
+    return r < 0.6 ? 'grunt' : 'drifter';
   }
 
   updateSpawning(dt) {
@@ -338,11 +450,23 @@ class NeonDriftRoom extends Room {
 
   spawnEnemy() {
     const e = new Enemy();
-    e.type = 'grunt';
-    e.maxHp = 3 + this.state.waveNum;
+    e.type = this.pickEnemyType(this.state.waveNum);
+    if (e.type === 'drifter') {
+      e.maxHp = 2 + this.state.waveNum;
+      e.speed = 110 + this.state.waveNum * 5;
+      e.r = 12;
+    } else if (e.type === 'weaver') {
+      e.maxHp = 2 + this.state.waveNum;
+      e.speed = 95 + this.state.waveNum * 4;
+      e.r = 13;
+      e.weaveT = 0;
+      e.weaveDir = Math.random() > 0.5 ? 1 : -1;
+    } else {
+      e.maxHp = 3 + this.state.waveNum;
+      e.speed = 70 + this.state.waveNum * 4;
+      e.r = 14;
+    }
     e.hp = e.maxHp;
-    e.r = 14;
-    e.speed = 70 + this.state.waveNum * 4;
     const side = Math.floor(Math.random() * 4);
     if (side === 0) { e.x = Math.random() * WORLD_W; e.y = -30; }
     else if (side === 1) { e.x = WORLD_W + 30; e.y = Math.random() * WORLD_H; }
@@ -351,12 +475,13 @@ class NeonDriftRoom extends Room {
     this.state.enemies.set(String(this.nextEntityId++), e);
   }
 
-  spawnPlayerProjectile(player) {
+  spawnPlayerProjectile(player, ownerId) {
     const proj = new Projectile();
     proj.x = player.x;
     proj.y = player.y;
     proj.r = 4;
     proj.ownerType = 'player';
+    proj.ownerId = ownerId || '';
     proj.vx = Math.cos(player.angle) * 600;
     proj.vy = Math.sin(player.angle) * 600;
     proj.life = 1.5;
@@ -365,4 +490,4 @@ class NeonDriftRoom extends Room {
   }
 }
 
-module.exports = { NeonDriftRoom, Player, Enemy, Projectile, RoomState };
+module.exports = { NeonDriftRoom, Player, Enemy, Projectile, Pickup, RoomState };

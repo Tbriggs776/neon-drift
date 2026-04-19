@@ -40,6 +40,7 @@ import {
   multiplayerEnabled,
   onMultiplayerChange,
   onGameStart,
+  onGameEnd,
   createRoom,
   joinRoomByCode,
   leaveRoom,
@@ -50,6 +51,8 @@ import {
   getRemotePlayers,
   getRemoteEnemies,
   getRemoteProjectiles,
+  getRemotePickups,
+  getRoomTotalScore,
   getMyPlayer,
   getRoomWaveNum,
   getWorldDims,
@@ -381,8 +384,10 @@ function mpTick(t, dt) {
     run.player.x = me.x;
     run.player.y = me.y;
     run.player.hp = me.hp;
+    if (me.maxHp) run.player.maxHp = me.maxHp;
   }
   run.waveNum = getRoomWaveNum() || 1;
+  run.score = getRoomTotalScore();
 
   // 2. Re-derive aim angle in world coords (mouseX/Y are canvas pixels).
   const wm = mpCanvasToWorld(mouseX, mouseY);
@@ -424,6 +429,8 @@ function mpRender() {
   ctx.lineWidth = 2;
   ctx.strokeRect(0, 0, ww, wh);
 
+  // Pickups (drawn under enemies/ships so they don't occlude action)
+  for (const pk of getRemotePickups()) drawMpPickup(pk);
   // Enemies
   for (const e of getRemoteEnemies()) drawMpEnemy(e);
   // Projectiles
@@ -447,12 +454,19 @@ function mpRender() {
   }
 }
 
+const MP_ENEMY_COLORS = {
+  grunt: '#ff2d95',
+  drifter: '#00f0ff',
+  weaver: '#ffea00'
+};
+
 function drawMpEnemy(e) {
+  const color = MP_ENEMY_COLORS[e.type] || '#ff2d95';
   ctx.save();
   ctx.translate(e.x, e.y);
-  ctx.shadowColor = '#ff2d95';
+  ctx.shadowColor = color;
   ctx.shadowBlur = 12;
-  ctx.fillStyle = '#ff2d95';
+  ctx.fillStyle = color;
   ctx.strokeStyle = '#ffffff';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
@@ -467,6 +481,23 @@ function drawMpEnemy(e) {
     ctx.fillStyle = '#ffea00';
     ctx.fillRect(-e.r, -e.r - 8, e.r * 2 * (e.hp / e.maxHp), 4);
   }
+  ctx.restore();
+}
+
+function drawMpPickup(pk) {
+  ctx.save();
+  ctx.translate(pk.x, pk.y);
+  // Soft pulse based on time so cores feel alive
+  const pulse = 1 + Math.sin(performance.now() / 250) * 0.15;
+  ctx.shadowColor = '#ffea00';
+  ctx.shadowBlur = 14;
+  ctx.fillStyle = '#ffea00';
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(0, 0, pk.r * pulse, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -4588,9 +4619,27 @@ document.getElementById('resetBtn').onclick = () => {
     alert('Progress reset.');
   }
 };
-document.getElementById('retryBtn').onclick = () => { hideAll(); newRun(); };
+document.getElementById('retryBtn').onclick = () => {
+  // MP runs can't be retried in place — leave the room and return to title.
+  if (run?.isMultiplayer) {
+    leaveRoom().catch(() => {});
+    run = null;
+    hideAll();
+    document.getElementById('titleScreen').classList.remove('hidden');
+    return;
+  }
+  hideAll();
+  newRun();
+};
 document.getElementById('deathMetaBtn').onclick = openMeta;
-document.getElementById('deathTitleBtn').onclick = () => { hideAll(); document.getElementById('titleScreen').classList.remove('hidden'); };
+document.getElementById('deathTitleBtn').onclick = () => {
+  if (run?.isMultiplayer) {
+    leaveRoom().catch(() => {});
+    run = null;
+  }
+  hideAll();
+  document.getElementById('titleScreen').classList.remove('hidden');
+};
 document.getElementById('leaveShopBtn').onclick = () => {
   hideAll();
   startWave(run.waveNum + 1);
@@ -4877,6 +4926,22 @@ document.getElementById('abandonBtn').onclick = () => {
     // Server runs the authoritative simulation; client renders state + sends input.
     hideAll();
     newRun({ seed, isMultiplayer: true });
+  });
+
+  onGameEnd(({ totalScore, waveReached }) => {
+    if (!run?.isMultiplayer) return;
+    // Reuse the existing death overlay with MP-appropriate copy.
+    run.active = false;
+    stopBGM();
+    hideAll();
+    document.getElementById('hud').classList.add('hidden');
+    document.getElementById('deathSubtitle').textContent = 'The grid consumed your squad';
+    document.getElementById('dsWave').textContent = waveReached || 1;
+    document.getElementById('dsScore').textContent = (totalScore || 0).toLocaleString();
+    document.getElementById('dsCores').textContent = '—';
+    document.getElementById('dsCombo').textContent = '—';
+    document.getElementById('dsBanked').textContent = '0';
+    document.getElementById('deathScreen').classList.remove('hidden');
   });
 
   // Weekly challenge banner + button on title screen

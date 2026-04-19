@@ -25,6 +25,7 @@ export function getCurrentRoom() { return currentRoom; }
 // ---- State snapshot + listeners ----
 const listeners = new Set();
 const gameStartListeners = new Set();
+const gameEndListeners = new Set();
 
 function snapshot() {
   if (!currentRoom || !currentRoom.state) {
@@ -65,6 +66,11 @@ export function onGameStart(fn) {
   return () => gameStartListeners.delete(fn);
 }
 
+export function onGameEnd(fn) {
+  gameEndListeners.add(fn);
+  return () => gameEndListeners.delete(fn);
+}
+
 function wireRoom(room) {
   currentRoom = room;
   room.onStateChange(() => emit());
@@ -79,6 +85,11 @@ function wireRoom(room) {
   });
   room.onMessage('gameStart', (msg) => {
     for (const fn of gameStartListeners) {
+      try { fn(msg); } catch (e) { console.warn(e); }
+    }
+  });
+  room.onMessage('gameEnd', (msg) => {
+    for (const fn of gameEndListeners) {
       try { fn(msg); } catch (e) { console.warn(e); }
     }
   });
@@ -186,6 +197,23 @@ export function getRemoteProjectiles() {
     out.push({ x: p.x, y: p.y, r: p.r, ownerType: p.ownerType });
   });
   return out;
+}
+
+export function getRemotePickups() {
+  if (!currentRoom || !currentRoom.state || !currentRoom.state.pickups) return [];
+  const out = [];
+  currentRoom.state.pickups.forEach((p) => {
+    out.push({ x: p.x, y: p.y, r: p.r, value: p.value });
+  });
+  return out;
+}
+
+export function getRoomTotalScore() {
+  return currentRoom?.state?.totalScore || 0;
+}
+
+export function isGameOver() {
+  return !!currentRoom?.state?.gameOver;
 }
 
 export function getRoomWaveNum() {
