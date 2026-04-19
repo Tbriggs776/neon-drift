@@ -45,12 +45,25 @@
   /* Overlays */
   .overlay {
     position: fixed; inset: 0;
-    display: flex; align-items: center; justify-content: center;
+    display: flex;
+    /* `safe center` centers when the card fits, but falls back to flex-start
+       so you can scroll to the top when the card is taller than the viewport
+       (common on iPhone portrait when auth + name + challenge banner + all
+       the buttons add up). */
+    align-items: safe center;
+    justify-content: center;
     flex-direction: column;
     z-index: 100;
     padding: 20px;
     background: radial-gradient(ellipse at center, rgba(10, 5, 20, 0.85), rgba(10, 5, 20, 0.98));
     backdrop-filter: blur(6px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    /* Allow native vertical pan; horizontal taps still hit buttons. */
+    touch-action: pan-y;
+    /* Respect iPhone notch/home-indicator so content isn't occluded. */
+    padding-top: calc(20px + env(safe-area-inset-top));
+    padding-bottom: calc(20px + env(safe-area-inset-bottom));
   }
   .overlay.hidden { display: none; }
 
