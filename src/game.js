@@ -388,21 +388,17 @@ function newMpRun(options) {
   document.getElementById('hud').classList.remove('hidden');
 }
 
-// Camera state shared by mpRender and mpCanvasToWorld. Fills the canvas
-// completely (Math.max scale) and follows the local player, clamped so the
-// camera never shows past world edges. This matches SP's "world fills the
-// screen" feel rather than the old black-bar letterbox.
+// Camera state shared by mpRender and mpCanvasToWorld. Every screen shows
+// the whole arena (Math.min scale), centered with bars on the spare sides,
+// so all pilots see exactly the same picture. camX/camY can be negative:
+// they're the world point at the canvas's top-left corner.
 function mpCamera() {
   const { w: ww, h: wh } = getWorldDims();
-  const scale = Math.max(canvas.width / ww, canvas.height / wh);
+  const scale = Math.min(canvas.width / ww, canvas.height / wh);
   const viewW = canvas.width / scale;
   const viewH = canvas.height / scale;
-  let px = (run && run.player) ? run.player.x : ww / 2;
-  let py = (run && run.player) ? run.player.y : wh / 2;
-  const spectating = getMyPlayer()?.dead ? mpSpectateTarget() : null;
-  if (spectating) { px = spectating.x; py = spectating.y; }
-  const camX = Math.max(0, Math.min(ww - viewW, px - viewW / 2));
-  const camY = Math.max(0, Math.min(wh - viewH, py - viewH / 2));
+  const camX = -(viewW - ww) / 2;
+  const camY = -(viewH - wh) / 2;
   return { ww, wh, scale, camX, camY, viewW, viewH };
 }
 
@@ -1132,7 +1128,7 @@ function drawMpDashCooldown(x, y, cd) {
   ctx.restore();
 }
 
-// While shot down, follow the living teammate with the lowest slot.
+// The teammate named in the spectate banner: the living one with the lowest slot.
 function mpSpectateTarget() {
   let best = null;
   for (const v of mpViews.ships.values()) {
