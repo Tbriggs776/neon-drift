@@ -202,12 +202,23 @@ export async function deleteAccount() {
 export async function setProfileDisplayName(name) {
   if (!isSignedIn()) return { error: { message: 'Not signed in' } };
   const trimmed = (name || '').trim().slice(0, 20);
-  const { data, error } = await supabase
+  const row = { display_name: trimmed || null, updated_at: new Date().toISOString() };
+  let { data, error } = await supabase
     .from('profiles')
-    .update({ display_name: trimmed || null, updated_at: new Date().toISOString() })
+    .update(row)
     .eq('id', currentSession.user.id)
     .select('id, display_name')
     .maybeSingle();
+  // Accounts made before the signup trigger existed have no profile row;
+  // create it (supabase/phase12_profile_backfill.sql allows this).
+  if (!error && !data) {
+    ({ data, error } = await supabase
+      .from('profiles')
+      .insert({ id: currentSession.user.id, ...row })
+      .select('id, display_name')
+      .maybeSingle());
+  }
+  if (!error && !data) error = { message: 'Name not saved' };
   if (!error) {
     currentProfile = data;
     emit();

@@ -5609,6 +5609,9 @@ document.getElementById('abandonBtn').onclick = () => {
   let profileSaveTimer = null;
   function refreshNameInput() {
     if (!nameInput) return;
+    // Don't rewrite the box while the pilot is typing in it (a save would
+    // trim away the space they just typed).
+    if (document.activeElement === nameInput) return;
     if (isSignedIn()) {
       const p = getProfile();
       nameInput.value = p?.display_name || '';
@@ -5626,7 +5629,10 @@ document.getElementById('abandonBtn').onclick = () => {
       const v = e.target.value;
       if (isSignedIn()) {
         if (profileSaveTimer) clearTimeout(profileSaveTimer);
-        profileSaveTimer = setTimeout(() => setProfileDisplayName(v), 400);
+        profileSaveTimer = setTimeout(async () => {
+          const { error } = await setProfileDisplayName(v);
+          if (error) toast("Couldn't save your name. Try again in a moment.");
+        }, 400);
       } else {
         setDisplayName(v);
       }
