@@ -6,6 +6,7 @@ const { ENEMY_DEFS, isBoss, getWaveInfo, makeEnemy, updateEnemyAI } = require('.
 // Server-authoritative dimensions. Clients render in their own
 // canvas size and rescale incoming positions from this world.
 // ============================================================
+const MAX_PILOTS = 5;
 const WORLD_W = 1280;
 const WORLD_H = 720;
 const TICK_HZ = 30;
@@ -33,6 +34,9 @@ class Player extends Schema {
     this.name = '';
     this.ready = false;
     this.isHost = false;
+    // Color slot 0..MAX_PILOTS-1, fixed for the session so every screen
+    // shows the same pilot in the same color.
+    this.slot = 0;
     this.x = WORLD_W / 2;
     this.y = WORLD_H / 2;
     this.angle = 0;
@@ -81,6 +85,7 @@ function resetRunStats(p) {
 type('string')(Player.prototype, 'name');
 type('boolean')(Player.prototype, 'ready');
 type('boolean')(Player.prototype, 'isHost');
+type('int8')(Player.prototype, 'slot');
 type('float32')(Player.prototype, 'x');
 type('float32')(Player.prototype, 'y');
 type('float32')(Player.prototype, 'angle');
@@ -131,6 +136,7 @@ class Projectile extends Schema {
     this.y = 0;
     this.r = 4;
     this.ownerType = 'player'; // 'player' | 'enemy'
+    this.owner = -1; // shooter's color slot (player shots only)
     // Velocity is synced so clients can move bullets smoothly between updates.
     this.vx = 0;
     this.vy = 0;
@@ -151,6 +157,7 @@ type('float32')(Projectile.prototype, 'x');
 type('float32')(Projectile.prototype, 'y');
 type('float32')(Projectile.prototype, 'r');
 type('string')(Projectile.prototype, 'ownerType');
+type('int8')(Projectile.prototype, 'owner');
 type('float32')(Projectile.prototype, 'vx');
 type('float32')(Projectile.prototype, 'vy');
 type('string')(Projectile.prototype, 'color');
@@ -312,7 +319,7 @@ function applyUpgrade(player, choice) {
 
 class NeonDriftRoom extends Room {
   onCreate(options) {
-    this.maxClients = 4;
+    this.maxClients = MAX_PILOTS;
     this.setState(new RoomState());
     this.state.code = generateCode();
     this.setMetadata({ code: this.state.code });
@@ -443,6 +450,11 @@ class NeonDriftRoom extends Room {
       ? String(options.name).slice(0, 20)
       : 'Pilot';
     player.isHost = this.state.players.size === 0;
+    const taken = new Set();
+    this.state.players.forEach((p) => taken.add(p.slot));
+    for (let i = 0; i < MAX_PILOTS; i++) {
+      if (!taken.has(i)) { player.slot = i; break; }
+    }
     this.state.players.set(client.sessionId, player);
   }
 
@@ -503,6 +515,7 @@ class NeonDriftRoom extends Room {
         proj.x = dx; proj.y = dy; proj.r = 3;
         proj.ownerType = 'player';
         proj.ownerId = sid;
+        proj.owner = p.slot;
         proj.vx = Math.cos(aim) * 500;
         proj.vy = Math.sin(aim) * 500;
         proj.life = 1.2;
@@ -1053,6 +1066,7 @@ class NeonDriftRoom extends Room {
     proj.r = FUSION_SHOT_RADIUS;
     proj.ownerType = 'player';
     proj.ownerId = ownerId || '';
+    proj.owner = player.slot;
     proj.vx = Math.cos(player.angle) * 520;
     proj.vy = Math.sin(player.angle) * 520;
     proj.life = 1.8;
@@ -1069,6 +1083,7 @@ class NeonDriftRoom extends Room {
     proj.r = 4;
     proj.ownerType = 'player';
     proj.ownerId = ownerId || '';
+    proj.owner = player.slot;
     proj.vx = Math.cos(angle) * speed;
     proj.vy = Math.sin(angle) * speed;
     proj.life = 1.5;

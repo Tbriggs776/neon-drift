@@ -348,7 +348,13 @@ let run = null;
 // Client just renders server state and forwards input. Single-player
 // code path is intentionally untouched — this is a parallel system.
 // ============================================================
-const MP_REMOTE_COLORS = ['#39ff14', '#ffea00', '#bc8cff'];
+// One color per pilot slot (the server assigns slots 0-4), so a pilot looks
+// the same on every screen: ship, name, pips, drones and bullets.
+const PILOT_COLORS = ['#ff2d95', '#00f0ff', '#39ff14', '#bc8cff', '#ff8c1a'];
+function pilotColor(slot) {
+  return PILOT_COLORS[(slot || 0) % PILOT_COLORS.length];
+}
+const BOSS_TYPES = ['warden', 'obelisk', 'hive', 'sentinel', 'prism'];
 
 function newMpRun(options) {
   const runSeed = options.seed || 0;
@@ -391,8 +397,10 @@ function mpCamera() {
   const scale = Math.max(canvas.width / ww, canvas.height / wh);
   const viewW = canvas.width / scale;
   const viewH = canvas.height / scale;
-  const px = (run && run.player) ? run.player.x : ww / 2;
-  const py = (run && run.player) ? run.player.y : wh / 2;
+  let px = (run && run.player) ? run.player.x : ww / 2;
+  let py = (run && run.player) ? run.player.y : wh / 2;
+  const spectating = getMyPlayer()?.dead ? mpSpectateTarget() : null;
+  if (spectating) { px = spectating.x; py = spectating.y; }
   const camX = Math.max(0, Math.min(ww - viewW, px - viewW / 2));
   const camY = Math.max(0, Math.min(wh - viewH, py - viewH / 2));
   return { ww, wh, scale, camX, camY, viewW, viewH };
@@ -679,6 +687,8 @@ function mpUpdateViews(dt) {
     mpEase(v, e.x, e.y, k, ww, wh, false);
     v.t += dt;
     v.r = e.r;
+    if (v.hp !== undefined && e.hp < v.hp) v.hitFlash = 0.1;
+    else if (v.hitFlash > 0) v.hitFlash -= dt;
     v.hp = e.hp;
     v.maxHp = e.maxHp;
     v.angle = e.angle;
@@ -710,6 +720,7 @@ function mpUpdateViews(dt) {
     v.ownerType = s.ownerType;
     v.color = s.color;
     v.crit = s.crit;
+    v.owner = s.owner;
   }
   for (const id of mpViews.shots.keys()) {
     if (!seenShots.has(id)) mpViews.shots.delete(id);
@@ -728,6 +739,9 @@ function mpUpdateViews(dt) {
     mpEase(v, r.x, r.y, k, ww, wh, true);
     v.angle = mpLerpAngle(v.angle, r.angle || 0, k);
     v.sessionId = r.sessionId;
+    v.slot = r.slot;
+    v.score = r.score;
+    if (v.iframes > 0) v.iframes -= dt;
     v.name = r.name;
     v.hp = r.hp;
     v.maxHp = r.maxHp;
@@ -778,7 +792,7 @@ function mpRender() {
   for (const v of mpViews.shots.values()) {
     if (v.ownerType !== 'player') continue;
     if (v.r >= 12) drawMpFusionShot(v);
-    else drawPlayerBullet(v);
+    else drawPlayerBullet(v, v.owner >= 0 ? pilotColor(v.owner) : '#ff2d95');
   }
   drawParticles();
   drawMpParticles();
@@ -789,26 +803,31 @@ function mpRender() {
   const remotes = [...mpViews.ships.values()];
   // Remote ships (pilots other than me) + their drones. While fused, living
   // pilots are drawn as cannons on the fused ship instead.
-  remotes.forEach((v, i) => {
-    const color = MP_REMOTE_COLORS[i % MP_REMOTE_COLORS.length];
+  for (const v of remotes) {
+    const color = pilotColor(v.slot);
     if (!fused) drawMpRemoteShip(v, color);
     if (!v.dead) drawMpDrones(v.x, v.y, v.droneCount, color);
-  });
+  }
   if (fused) drawMpFusedShip(me, remotes, fusion);
   // Local ship + drones (drawn last so they sit on top)
+  const myColor = pilotColor(me?.slot);
   if (me && !me.dead) {
-    if (!fused) drawPlayer(run.player);
-    drawMpDrones(run.player.x, run.player.y, me.droneCount || 0, '#00f0ff');
+    if (!fused) drawPlayer(run.player, myColor);
+    drawMpDrones(run.player.x, run.player.y, me.droneCount || 0, myColor);
     // Local HP pips + dash CD ring under the ship (in addition to the HUD
     // pips, because the HUD is at the top of the screen during intense play).
-    drawMpHpPips(run.player.x, run.player.y + 22, me.hp || 0, me.maxHp || 3, '#ff2d95');
+    drawMpHpPips(run.player.x, run.player.y + 22, me.hp || 0, me.maxHp || 3, myColor);
     if ((me.dashCD || 0) > 0) drawMpDashCooldown(run.player.x, run.player.y, me.dashCD);
-  } else if (me?.dead) {
-    drawMpDeadOverlay();
   }
 
   ctx.restore();
 
+  // Screen-space overlays
+  drawMpOffscreenMarkers(cam, fused);
+  const boss = [...mpViews.enemies.values()].find((v) => BOSS_TYPES.includes(v.type));
+  if (boss) drawBossBar(boss);
+  drawMpTeamPanel(me, remotes);
+  if (me?.dead) drawMpSpectateBanner();
   drawMpFusionMeter(fusion);
 
   // HUD (canvas pixel coords)
@@ -817,7 +836,6 @@ function mpRender() {
   }
 }
 
-const MP_BOSS_TYPES = ['warden', 'miniboss', 'obelisk', 'hive', 'sentinel', 'prism'];
 const MP_ENEMY_COLORS = {
   grunt: '#ff2d95',
   drifter: '#00f0ff',
@@ -910,10 +928,10 @@ function drawMpFusedShip(me, remotes, fusion) {
     cx = d.x; cy = d.y;
   }
   const cannons = [];
-  if (me && !me.dead) cannons.push({ angle: run.player.angle, color: '#ff2d95' });
-  remotes.forEach((r, i) => {
-    if (!r.dead) cannons.push({ angle: r.angle || 0, color: MP_REMOTE_COLORS[i % MP_REMOTE_COLORS.length] });
-  });
+  if (me && !me.dead) cannons.push({ angle: run.player.angle, color: pilotColor(me.slot) });
+  for (const r of remotes) {
+    if (!r.dead) cannons.push({ angle: r.angle || 0, color: pilotColor(r.slot) });
+  }
   const t = performance.now() / 1000;
   const pulse = 1 + Math.sin(t * 8) * 0.06;
   ctx.save();
@@ -992,6 +1010,42 @@ function drawMpFusionMeter(fusion) {
   ctx.shadowBlur = fused ? 14 + Math.sin(performance.now() / 80) * 6 : 8;
   ctx.fillStyle = color;
   ctx.fillRect(x + 1, y + 1, Math.max(0, (w - 2) * Math.min(1, frac)), h - 2);
+  ctx.restore();
+}
+
+// Bottom edge of the DOM HUD in canvas pixels, so canvas overlays sit below
+// it on every device (the HUD already respects the notch / safe area).
+function hudBottom() {
+  const hud = document.getElementById('hud');
+  const r = hud && !hud.classList.contains('hidden') ? hud.getBoundingClientRect() : null;
+  return r && r.height > 0 ? r.bottom : 44;
+}
+
+// Boss name and health across the top of the screen.
+function drawBossBar(e) {
+  const w = Math.min(520, canvas.width * 0.6), h = 8;
+  const x = canvas.width / 2 - w / 2;
+  const y = hudBottom() + 18;
+  const frac = Math.max(0, Math.min(1, e.hp / e.maxHp));
+  const color = e.color || '#ff3860';
+  ctx.save();
+  ctx.font = 'bold 11px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 8;
+  ctx.fillText(e.type.toUpperCase(), canvas.width / 2, y - 3);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(10, 5, 20, 0.75)';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, w, h);
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 10;
+  ctx.fillStyle = color;
+  ctx.fillRect(x + 1, y + 1, (w - 2) * frac, h - 2);
   ctx.restore();
 }
 
@@ -1078,20 +1132,119 @@ function drawMpDashCooldown(x, y, cd) {
   ctx.restore();
 }
 
-function drawMpDeadOverlay() {
-  // Draw a "DRIFTED" banner in the world layer over the map center.
+// While shot down, follow the living teammate with the lowest slot.
+function mpSpectateTarget() {
+  let best = null;
+  for (const v of mpViews.ships.values()) {
+    if (!v.dead && (!best || v.slot < best.slot)) best = v;
+  }
+  return best;
+}
+
+function drawMpSpectateBanner() {
+  const target = mpSpectateTarget();
   ctx.save();
-  ctx.fillStyle = 'rgba(255, 77, 109, 0.9)';
-  ctx.font = 'bold 64px "Courier New", monospace';
   ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255, 77, 109, 0.95)';
   ctx.shadowColor = '#ff4d6d';
-  ctx.shadowBlur = 30;
-  ctx.fillText('DRIFTED', 640, 360);
-  ctx.font = '14px "Courier New", monospace';
+  ctx.shadowBlur = 20;
+  ctx.font = 'bold 34px "Courier New", monospace';
+  const y = Math.max(110, canvas.height * 0.16);
+  ctx.fillText('DRIFTED', canvas.width / 2, y);
+  ctx.shadowBlur = 4;
+  ctx.font = '13px "Courier New", monospace';
   ctx.fillStyle = '#ffffff';
-  ctx.fillText('Spectating teammates · Pause to leave', 640, 400);
+  ctx.fillText(target ? `Spectating ${target.name || 'pilot'} · Pause to leave` : 'Pause to leave',
+    canvas.width / 2, y + 24);
   ctx.restore();
 }
+
+// Arrows on the screen edge pointing at teammates and bosses that are out
+// of view (the camera often shows only part of the world on phones).
+function drawMpOffscreenMarkers(cam, fused) {
+  const targets = [];
+  if (!fused) {
+    for (const v of mpViews.ships.values()) {
+      if (!v.dead) targets.push({ x: v.x, y: v.y, color: pilotColor(v.slot), size: 9 });
+    }
+  }
+  for (const v of mpViews.enemies.values()) {
+    if (BOSS_TYPES.includes(v.type)) targets.push({ x: v.x, y: v.y, color: v.color, size: 14 });
+  }
+  const margin = 26;
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+  for (const t of targets) {
+    const sx = (t.x - cam.camX) * cam.scale;
+    const sy = (t.y - cam.camY) * cam.scale;
+    if (sx >= 0 && sx <= canvas.width && sy >= 0 && sy <= canvas.height) continue;
+    // Walk from the screen center toward the target until we hit the margin box.
+    const dx = sx - cx, dy = sy - cy;
+    const k = Math.min(
+      (cx - margin) / Math.max(1e-6, Math.abs(dx)),
+      (cy - margin) / Math.max(1e-6, Math.abs(dy))
+    );
+    const ax = cx + dx * k, ay = cy + dy * k;
+    const ang = Math.atan2(dy, dx);
+    ctx.save();
+    ctx.translate(ax, ay);
+    ctx.rotate(ang);
+    ctx.fillStyle = t.color;
+    ctx.shadowColor = t.color;
+    ctx.shadowBlur = 12;
+    ctx.globalAlpha = 0.85;
+    ctx.beginPath();
+    ctx.moveTo(t.size, 0);
+    ctx.lineTo(-t.size * 0.7, -t.size * 0.75);
+    ctx.lineTo(-t.size * 0.35, 0);
+    ctx.lineTo(-t.size * 0.7, t.size * 0.75);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// Team panel, top left under the HUD: color, name, hull pips and score for
+// every pilot. Shot-down pilots are dimmed.
+function drawMpTeamPanel(me, remotes) {
+  const rows = [];
+  if (me) rows.push({ slot: me.slot, name: me.name || 'You', hp: me.hp, maxHp: me.maxHp, score: me.score, dead: me.dead, isMe: true });
+  for (const v of remotes) rows.push({ slot: v.slot, name: v.name, hp: v.hp, maxHp: v.maxHp, score: v.score, dead: v.dead });
+  if (rows.length < 2) return;
+  rows.sort((a, b) => a.slot - b.slot);
+  const x = 14, rowH = 18;
+  // On narrow screens the boss bar spans the top, so stack the panel below it.
+  const bossShowing = [...mpViews.enemies.values()].some((v) => BOSS_TYPES.includes(v.type));
+  let y = hudBottom() + 18 + (bossShowing && canvas.width < 760 ? 30 : 0);
+  ctx.save();
+  ctx.font = '11px "Courier New", monospace';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(10, 5, 20, 0.55)';
+  ctx.fillRect(x - 6, y - 8, 190, rows.length * rowH + 6);
+  for (const r of rows) {
+    const color = pilotColor(r.slot);
+    ctx.globalAlpha = r.dead ? 0.4 : 1;
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 6;
+    ctx.fillRect(x, y - 5, 4, 10);
+    ctx.shadowBlur = 0;
+    ctx.textAlign = 'left';
+    const label = (r.name || 'pilot').slice(0, 10) + (r.isMe ? ' ★' : '');
+    ctx.fillText(label, x + 10, y);
+    // Hull pips
+    const maxHp = r.maxHp || 3;
+    for (let i = 0; i < Math.min(maxHp, 8); i++) {
+      ctx.fillStyle = !r.dead && i < (r.hp || 0) ? color : 'rgba(255, 255, 255, 0.15)';
+      ctx.fillRect(x + 100 + i * 6, y - 3, 4, 6);
+    }
+    ctx.fillStyle = r.dead ? '#888888' : '#ffffff';
+    ctx.textAlign = 'right';
+    ctx.fillText(r.dead ? 'DOWN' : String(r.score || 0), x + 180, y);
+    y += rowH;
+  }
+  ctx.restore();
+}
+
 
 // MP upgrade modal — shown when server signals upgradeChoices.
 function showMpUpgradeScreen(choices) {
@@ -3343,6 +3496,7 @@ function updateEnemies(dt) {
   for (let i = run.enemies.length - 1; i >= 0; i--) {
     const e = run.enemies[i];
     e.t += dt;
+    if (e.hitFlash > 0) e.hitFlash -= dt;
     const dx = p.x - e.x;
     const dy = p.y - e.y;
     const dist = Math.hypot(dx, dy) || 1;
@@ -3661,6 +3815,7 @@ function updateProjectiles(dt) {
       if (pr.hitIds.has(j)) continue;
       if (circleHit(pr.x, pr.y, pr.r, e.x, e.y, e.r)) {
         e.hp -= pr.damage;
+        e.hitFlash = 0.1;
         pr.hitIds.add(j);
         spawnHitParticles(pr.x, pr.y, pr.crit ? '#ffea00' : e.color);
         if (pr.explosive) {
@@ -4130,15 +4285,18 @@ function render() {
 
   ctx.restore();
 
+  const boss = run.enemies.find((e) => BOSS_TYPES.includes(e.type));
+  if (boss) drawBossBar(boss);
+
   // HUD sync (lightweight, every frame)
   updateHUD();
 }
 
 // Glowing capsule bullet; crits are yellow. Shared by single player and
-// multiplayer (which passes its own projectile views).
-function drawPlayerBullet(pr) {
+// multiplayer (which passes its own projectile views and the shooter's color).
+function drawPlayerBullet(pr, baseColor = '#ff2d95') {
   ctx.save();
-  const color = pr.crit ? '#ffea00' : '#ff2d95';
+  const color = pr.crit ? '#ffea00' : baseColor;
   const angle = Math.atan2(pr.vy, pr.vx);
   ctx.translate(pr.x, pr.y);
   ctx.rotate(angle);
@@ -5093,6 +5251,19 @@ function drawEnemy(e) {
 
   ctx.restore();
 
+  // Brief white flash when hit
+  if (e.hitFlash > 0) {
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, e.hitFlash / 0.1) * 0.55;
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   // HP bar for tough enemies
   if (e.maxHp > 3) {
     ctx.save();
@@ -5484,7 +5655,7 @@ document.getElementById('abandonBtn').onclick = () => {
       mpRoomCode.textContent = state.code || '------';
       mpPlayerList.innerHTML = state.players.map((p) => `
         <div style="display: flex; justify-content: space-between; padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.05);">
-          <span style="color: ${p.isMe ? 'var(--cyan)' : 'var(--text)'};">${escapeHtml(p.name)} ${p.isHost ? '<span style="color: var(--yellow);">[host]</span>' : ''} ${p.isMe ? '<span class="dim">(you)</span>' : ''}</span>
+          <span style="color: ${pilotColor(p.slot)};"><span style="display: inline-block; width: 8px; height: 8px; margin-right: 6px; background: ${pilotColor(p.slot)}; box-shadow: 0 0 6px ${pilotColor(p.slot)};"></span>${escapeHtml(p.name)} ${p.isHost ? '<span style="color: var(--yellow);">[host]</span>' : ''} ${p.isMe ? '<span class="dim">(you)</span>' : ''}</span>
           <span style="color: ${p.ready ? '#39ff14' : 'var(--dim)'};">${p.ready ? 'READY' : 'not ready'}</span>
         </div>
       `).join('');
@@ -5617,7 +5788,7 @@ document.getElementById('abandonBtn').onclick = () => {
   onFx((msg) => {
     if (!run?.isMultiplayer || !msg) return;
     if (msg.type === 'enemyDeath') {
-      const big = MP_BOSS_TYPES.includes(msg.eType);
+      const big = BOSS_TYPES.includes(msg.eType);
       const color = ENEMY_DEFS[msg.eType]?.color || MP_ENEMY_COLORS[msg.eType] || '#ff2d95';
       spawnExplosion(msg.x, msg.y, color, big ? 60 : 20);
       spawnMpParticles({
@@ -5640,6 +5811,8 @@ document.getElementById('abandonBtn').onclick = () => {
       if (mine) {
         run.screenShake = 14;
         run.player.iframes = 1.0;
+      } else if (msg.sid && mpViews.ships.has(msg.sid)) {
+        mpViews.ships.get(msg.sid).iframes = 1.0;
       }
     } else if (msg.type === 'bossSpawn') {
       playSound('bosswarn');

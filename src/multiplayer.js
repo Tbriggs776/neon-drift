@@ -42,6 +42,7 @@ function snapshot() {
       name: p.name,
       ready: p.ready,
       isHost: p.isHost,
+      slot: p.slot || 0,
       isMe: sid === mySession
     });
   });
@@ -214,6 +215,8 @@ export function getRemotePlayers() {
       maxHp: p.maxHp || 3,
       dead: p.dead,
       isHost: p.isHost,
+      slot: p.slot || 0,
+      score: p.score || 0,
       droneCount: p.droneCount || 0
     });
   });
@@ -249,7 +252,8 @@ export function getRemoteProjectiles() {
   currentRoom.state.projectiles.forEach((p, id) => {
     out.push({
       id, x: p.x, y: p.y, r: p.r, ownerType: p.ownerType,
-      vx: p.vx || 0, vy: p.vy || 0, color: p.color || '', crit: !!p.crit
+      vx: p.vx || 0, vy: p.vy || 0, color: p.color || '', crit: !!p.crit,
+      owner: p.owner ?? -1
     });
   });
   return out;

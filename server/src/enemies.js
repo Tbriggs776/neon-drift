@@ -283,6 +283,16 @@ function updateEnemyAI(e, p, dt, worldW, worldH, fx) {
 
   e.x += e.vx * dt;
   e.y += e.vy * dt;
+
+  // Enemies spawn just outside the world. Once fully inside they stay
+  // inside, so kiting enemies and bosses can't back out of bullet range.
+  if (!e.entered && e.x > e.r && e.x < worldW - e.r && e.y > e.r && e.y < worldH - e.r) {
+    e.entered = true;
+  }
+  if (e.entered) {
+    e.x = Math.max(e.r, Math.min(worldW - e.r, e.x));
+    e.y = Math.max(e.r, Math.min(worldH - e.r, e.y));
+  }
 }
 
 module.exports = { ENEMY_DEFS, BOSS_TYPES, isBoss, getWaveInfo, makeEnemy, updateEnemyAI };
