@@ -265,6 +265,17 @@ export function isGameOver() {
   return !!currentRoom?.state?.gameOver;
 }
 
+// Fusion state: shared meter (0..1), seconds left while fused, and who drives.
+export function getFusion() {
+  const st = currentRoom?.state;
+  return {
+    meter: st?.fusionMeter || 0,
+    time: st?.fusionTime || 0,
+    driver: st?.fusionDriver || '',
+    mySession: currentRoom?.sessionId || ''
+  };
+}
+
 export function getRoomWaveNum() {
   return currentRoom?.state?.waveNum || 0;
 }

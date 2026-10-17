@@ -10,6 +10,17 @@ const WORLD_H = 720;
 const TICK_HZ = 30;
 const FORK_FAN = 0.9; // Fork Rounds total fan width in radians (about 26° each side)
 
+// Fusion: team kills fill a shared meter. When it's full, every living pilot
+// snaps into one ship for FUSION_DURATION seconds. The host drives (or the
+// first living pilot if the host is down), everyone aims their own giant
+// cannon, and the fused ship can't be hurt. Enemies that touch it are crushed.
+const FUSION_DURATION = 10;
+const FUSION_PER_KILL = 0.04;       // 25 regular kills fills the meter
+const FUSION_PER_BOSS_KILL = 0.35;
+const FUSION_FIRE_CD = 0.3;
+const FUSION_SHOT_DAMAGE = 40;      // one-shots every regular enemy
+const FUSION_SHOT_RADIUS = 16;      // clients draw r >= 12 as fusion rounds
+
 // ============================================================
 // Schema state (only typed fields are sync'd; plain JS fields
 // are server-only AI / cooldown bookkeeping).
@@ -96,6 +107,7 @@ class Projectile extends Schema {
     this.life = 1.5;
     this.damage = 1;
     this.ownerId = ''; // sessionId of the player who fired (for score)
+    this.hitIds = null; // fusion rounds pierce: enemies already hit
   }
 }
 type('float32')(Projectile.prototype, 'x');
@@ -127,6 +139,9 @@ class RoomState extends Schema {
     this.seed = 0;
     this.waveNum = 0;
     this.totalScore = 0;
+    this.fusionMeter = 0;   // 0..1, fills from team kills
+    this.fusionTime = 0;    // seconds of fusion left; > 0 means fused
+    this.fusionDriver = ''; // sessionId steering the fused ship
     this.worldW = WORLD_W;
     this.worldH = WORLD_H;
     this.players = new MapSchema();
@@ -141,6 +156,9 @@ type('boolean')(RoomState.prototype, 'gameOver');
 type('int32')(RoomState.prototype, 'seed');
 type('int16')(RoomState.prototype, 'waveNum');
 type('int32')(RoomState.prototype, 'totalScore');
+type('float32')(RoomState.prototype, 'fusionMeter');
+type('float32')(RoomState.prototype, 'fusionTime');
+type('string')(RoomState.prototype, 'fusionDriver');
 type('int16')(RoomState.prototype, 'worldW');
 type('int16')(RoomState.prototype, 'worldH');
 type({ map: Player })(RoomState.prototype, 'players');
@@ -239,6 +257,7 @@ class NeonDriftRoom extends Room {
       if (!this.state.started || this.state.gameOver || this.upgradePhase) return;
       const p = this.state.players.get(client.sessionId);
       if (!p || p.dead || (p.dashCD || 0) > 0) return;
+      if (this.state.fusionTime > 0 && client.sessionId !== this.state.fusionDriver) return;
       const inp = this.playerInput.get(client.sessionId);
       // Dash goes in the move direction if any, else in aim direction.
       let dx = 0, dy = 0;
@@ -282,6 +301,9 @@ class NeonDriftRoom extends Room {
       this.state.started = true;
       this.state.gameOver = false;
       this.state.totalScore = 0;
+      this.state.fusionMeter = 0;
+      this.state.fusionTime = 0;
+      this.state.fusionDriver = '';
       // Reset gameplay state for the run.
       this.state.enemies.clear();
       this.state.projectiles.clear();
@@ -345,6 +367,7 @@ class NeonDriftRoom extends Room {
     if (!this.state.started || this.state.gameOver) return;
     if (this.upgradePhase) return; // sim is paused while pilots pick upgrades
     this.simTime = (this.simTime || 0) + dt;
+    this.updateFusion(dt);
     this.updatePlayers(dt);
     this.updateDrones(dt);
     this.updateEnemies(dt);
@@ -394,6 +417,8 @@ class NeonDriftRoom extends Room {
   updatePlayers(dt) {
     const BASE_SPEED = 240;
     const BASE_FIRE_CD = 0.15;
+    const fused = this.state.fusionTime > 0;
+    if (fused) this.snapToFusionDriver();
     this.state.players.forEach((p, sid) => {
       if (p.iframes > 0) p.iframes = Math.max(0, p.iframes - dt);
       p.fireCD = Math.max(0, (p.fireCD || 0) - dt);
@@ -401,20 +426,103 @@ class NeonDriftRoom extends Room {
       if (p.dead) return;
       const inp = this.playerInput.get(sid);
       if (!inp) return;
-      // Movement (with speed upgrade)
-      let mx = inp.moveX, my = inp.moveY;
-      const mag = Math.hypot(mx, my);
-      if (mag > 1) { mx /= mag; my /= mag; }
-      const speed = BASE_SPEED * (p.speedMul || 1);
-      p.x = clamp(p.x + mx * speed * dt, 12, WORLD_W - 12);
-      p.y = clamp(p.y + my * speed * dt, 12, WORLD_H - 12);
+      // Movement (with speed upgrade). While fused only the driver steers.
+      if (!fused || sid === this.state.fusionDriver) {
+        let mx = inp.moveX, my = inp.moveY;
+        const mag = Math.hypot(mx, my);
+        if (mag > 1) { mx /= mag; my /= mag; }
+        const speed = BASE_SPEED * (p.speedMul || 1);
+        p.x = clamp(p.x + mx * speed * dt, 12, WORLD_W - 12);
+        p.y = clamp(p.y + my * speed * dt, 12, WORLD_H - 12);
+      }
       p.angle = inp.aimAngle;
-      // Fire (with fire-rate upgrade — divides cooldown)
+      // Fire (with fire-rate upgrade — divides cooldown). Fused pilots fire
+      // their giant cannon on a fixed cadence instead.
       if (inp.firing && p.fireCD <= 0) {
-        p.fireCD = BASE_FIRE_CD / (p.fireRateMul || 1);
-        this.spawnPlayerProjectile(p, sid);
+        if (fused) {
+          p.fireCD = FUSION_FIRE_CD;
+          this.spawnFusionShot(p, sid);
+        } else {
+          p.fireCD = BASE_FIRE_CD / (p.fireRateMul || 1);
+          this.spawnPlayerProjectile(p, sid);
+        }
       }
     });
+    if (fused) this.snapToFusionDriver();
+  }
+
+  // ----------------------------------------------------------
+  // Fusion
+  // ----------------------------------------------------------
+  pickFusionDriver() {
+    let host = null, first = null;
+    this.state.players.forEach((p, sid) => {
+      if (p.dead) return;
+      if (!first) first = sid;
+      if (p.isHost) host = sid;
+    });
+    return host || first;
+  }
+
+  // Keeps every living pilot on the driver's position. Re-picks the driver
+  // if the current one left the room.
+  snapToFusionDriver() {
+    const current = this.state.players.get(this.state.fusionDriver);
+    if (!current || current.dead) this.state.fusionDriver = this.pickFusionDriver() || '';
+    const driver = this.state.players.get(this.state.fusionDriver);
+    if (!driver) return;
+    this.state.players.forEach((p) => {
+      if (p.dead || p === driver) return;
+      p.x = driver.x;
+      p.y = driver.y;
+    });
+  }
+
+  addFusionCharge(amount) {
+    if (this.state.fusionTime > 0) return;
+    this.state.fusionMeter = Math.min(1, this.state.fusionMeter + amount);
+    if (this.state.fusionMeter >= 1) this.startFusion();
+  }
+
+  startFusion() {
+    const driverSid = this.pickFusionDriver();
+    const driver = driverSid && this.state.players.get(driverSid);
+    if (!driver) return;
+    this.state.fusionMeter = 0;
+    this.state.fusionTime = FUSION_DURATION;
+    this.state.fusionDriver = driverSid;
+    this.state.players.forEach((p) => {
+      if (p.dead) return;
+      p.x = driver.x;
+      p.y = driver.y;
+      p.fireCD = 0;
+    });
+    this.broadcast('fx', { type: 'fusionStart', x: driver.x, y: driver.y });
+  }
+
+  updateFusion(dt) {
+    if (this.state.fusionTime <= 0) return;
+    this.state.fusionTime = Math.max(0, this.state.fusionTime - dt);
+    if (this.state.fusionTime === 0) this.endFusion();
+  }
+
+  // Split the team back apart in a small ring around the driver, with a
+  // moment of invulnerability so nobody pops out into an enemy.
+  endFusion() {
+    const driver = this.state.players.get(this.state.fusionDriver)
+      || this.state.players.get(this.pickFusionDriver());
+    this.state.fusionDriver = '';
+    if (!driver) return;
+    const others = [];
+    this.state.players.forEach((p) => { if (!p.dead && p !== driver) others.push(p); });
+    others.forEach((p, i) => {
+      const a = (i / others.length) * Math.PI * 2;
+      p.x = clamp(driver.x + Math.cos(a) * 40, 12, WORLD_W - 12);
+      p.y = clamp(driver.y + Math.sin(a) * 40, 12, WORLD_H - 12);
+      p.iframes = 1.0;
+    });
+    driver.iframes = 1.0;
+    this.broadcast('fx', { type: 'fusionEnd', x: driver.x, y: driver.y });
   }
 
   updateEnemies(dt) {
@@ -469,8 +577,14 @@ class NeonDriftRoom extends Room {
         const dx = proj.x - e.x, dy = proj.y - e.y;
         const rr = (proj.r + e.r);
         if (dx * dx + dy * dy < rr * rr) {
+          if (proj.hitIds) {
+            // Fusion rounds pierce: hit each enemy once and keep flying.
+            if (proj.hitIds.has(eId)) return;
+            proj.hitIds.add(eId);
+          } else {
+            projDeath.add(projId);
+          }
           e.hp -= proj.damage;
-          projDeath.add(projId);
           if (e.hp <= 0) {
             enemyDeath.add(eId);
             this.onEnemyKilled(e, proj.ownerId);
@@ -480,6 +594,26 @@ class NeonDriftRoom extends Room {
     });
     for (const id of projDeath) this.state.projectiles.delete(id);
     for (const id of enemyDeath) this.state.enemies.delete(id);
+
+    // Fused ship: can't be hurt, and enemies that touch it are crushed.
+    if (this.state.fusionTime > 0) {
+      const driver = this.state.players.get(this.state.fusionDriver);
+      if (driver) {
+        const crushed = [];
+        this.state.enemies.forEach((e, eId) => {
+          const dx = driver.x - e.x, dy = driver.y - e.y;
+          const rr = (28 + e.r);
+          if (dx * dx + dy * dy >= rr * rr) return;
+          e.hp -= FUSION_SHOT_DAMAGE * dt * 4;
+          if (e.hp <= 0) {
+            crushed.push(eId);
+            this.onEnemyKilled(e, this.state.fusionDriver);
+          }
+        });
+        for (const id of crushed) this.state.enemies.delete(id);
+      }
+      return;
+    }
 
     // Enemy contact damage to players
     this.state.enemies.forEach((e) => {
@@ -520,6 +654,8 @@ class NeonDriftRoom extends Room {
     }
     // Client uses this to play explosion SFX + spawn particles.
     this.broadcast('fx', { type: 'enemyDeath', x: e.x, y: e.y, eType: e.type });
+    const boss = e.type === 'warden' || e.type === 'miniboss';
+    this.addFusionCharge(boss ? FUSION_PER_BOSS_KILL : FUSION_PER_KILL);
   }
 
   spawnPickup(x, y) {
@@ -700,6 +836,21 @@ class NeonDriftRoom extends Room {
       const t = count > 1 ? i / (count - 1) - 0.5 : 0;
       this.spawnProjectileAt(player, ownerId, player.angle + t * FORK_FAN);
     }
+  }
+
+  spawnFusionShot(player, ownerId) {
+    const proj = new Projectile();
+    proj.x = player.x + Math.cos(player.angle) * 30;
+    proj.y = player.y + Math.sin(player.angle) * 30;
+    proj.r = FUSION_SHOT_RADIUS;
+    proj.ownerType = 'player';
+    proj.ownerId = ownerId || '';
+    proj.vx = Math.cos(player.angle) * 520;
+    proj.vy = Math.sin(player.angle) * 520;
+    proj.life = 1.8;
+    proj.damage = FUSION_SHOT_DAMAGE * (player.damageMul || 1);
+    proj.hitIds = new Set();
+    this.state.projectiles.set(String(this.nextEntityId++), proj);
   }
 
   spawnProjectileAt(player, ownerId, angle) {
