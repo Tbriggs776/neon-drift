@@ -50,8 +50,8 @@
        so you can scroll to the top when the card is taller than the viewport
        (common on iPhone portrait when auth + name + challenge banner + all
        the buttons add up). */
-    align-items: safe center;
-    justify-content: center;
+    align-items: center;
+    justify-content: safe center;
     flex-direction: column;
     z-index: 100;
     padding: 20px;
