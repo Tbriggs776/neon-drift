@@ -72,6 +72,7 @@ import {
 import { initMenuNav, navGamepadFrame } from './menuNav.js';
 import { initNative } from './native.js';
 import { SHIPS, PILOT_COLORS, PILOT_COLOR_NAMES, getShip, drawShipModel, shipGuns } from './ships.js';
+import { linkProgress, queueProgressPush, flushProgressPush } from './progressSync.js';
 
 
 // ============================================================
@@ -264,8 +265,31 @@ function loadMeta() {
   } catch (e) { return JSON.parse(JSON.stringify(META_DEFAULTS)); }
 }
 function saveMeta() {
+  meta.savedAt = Date.now();
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(meta)); } catch (e) {}
+  // Signed-in pilots also get a cloud copy (progressSync.js).
+  queueProgressPush(meta);
 }
+
+// When a pilot signs in, merge this device's save with their account's and
+// keep the result on both. Signing out stops the cloud copy; the device
+// keeps its local save.
+let progressUserId = null;
+onAuthChange(({ session }) => {
+  const uid = session?.user?.id || null;
+  if (uid === progressUserId) return;
+  progressUserId = uid;
+  linkProgress(uid, meta).then((merged) => {
+    if (!merged || uid !== progressUserId) return;
+    meta = merged;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(meta)); } catch (e) {}
+    refreshPilotLevelLine();
+    syncLoadout();
+  }).catch((e) => console.warn('Progress sync failed:', e));
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushProgressPush();
+});
 
 // ---- Pilot level ----
 // Level L needs 250 * (L - 1)^1.6 total XP: level 3 after a couple of runs,
@@ -5503,9 +5527,11 @@ refreshPilotLevelLine();
 syncLoadout();
 document.getElementById('closeMetaBtn').onclick = () => { hideAll(); document.getElementById('titleScreen').classList.remove('hidden'); };
 document.getElementById('resetBtn').onclick = () => {
-  if (confirm('Wipe all meta progress?')) {
+  const where = isSignedIn() ? 'on this device and your account' : 'on this device';
+  if (confirm(`Wipe all progress ${where}? Pilot level, ships, Hangar upgrades and cores reset to zero.`)) {
     localStorage.removeItem(STORAGE_KEY);
     meta = loadMeta();
+    saveMeta();
     refreshPilotLevelLine();
     syncLoadout();
     alert('Progress reset.');
