@@ -335,6 +335,29 @@
   .meta-node:hover:not(.maxed):not(.locked) { border-color: var(--cyan); box-shadow: 0 0 15px rgba(0, 240, 255, 0.3); }
   .meta-node.maxed { border-color: var(--green); opacity: 0.6; cursor: default; }
   .meta-node.locked { opacity: 0.3; cursor: not-allowed; }
+
+  /* Ships screen */
+  .pilot-level-line { text-align: center; font-size: 11px; letter-spacing: 2px; color: var(--yellow); margin: -2px 0 8px; }
+  .xp-bar { height: 6px; background: rgba(255, 255, 255, 0.08); border: 1px solid var(--dim); margin: 10px 0 4px; }
+  .xp-fill { height: 100%; width: 0; background: var(--yellow); box-shadow: 0 0 10px var(--yellow); }
+  .xp-text { font-size: 11px; letter-spacing: 1px; text-align: right; margin: 0; font-variant-numeric: tabular-nums; }
+  .ship-colors { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin: 14px 0; }
+  .ship-color { width: 30px; height: 30px; border-radius: 50%; border: 2px solid transparent; padding: 0; cursor: pointer; background: var(--c); box-shadow: 0 0 10px var(--c); }
+  .ship-color[aria-pressed="true"] { border-color: #ffffff; transform: scale(1.15); }
+  .ship-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin: 8px 0 16px; }
+  .ship-card {
+    background: rgba(0, 0, 0, 0.35); border: 1px solid var(--border, var(--dim)); padding: 0;
+    color: inherit; font: inherit; text-align: left; cursor: pointer; display: flex; flex-direction: column;
+  }
+  .ship-card canvas { display: block; width: 100%; aspect-ratio: 3 / 2; }
+  .ship-card .ship-info { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 3px; }
+  .ship-card .ship-name { font-weight: bold; letter-spacing: 2px; overflow-wrap: anywhere; }
+  .ship-card .ship-style { color: var(--yellow); font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; }
+  .ship-card .ship-perk { font-size: 11px; color: var(--dim); line-height: 1.4; }
+  .ship-card[aria-pressed="true"] { border-color: var(--cyan); box-shadow: 0 0 18px rgba(0, 240, 255, 0.35); }
+  .ship-card.locked { cursor: not-allowed; }
+  .ship-card.locked canvas { filter: grayscale(1) brightness(0.45); }
+  .ds-xp { text-align: center; color: var(--yellow); font-size: 13px; letter-spacing: 1px; min-height: 1em; }
   .meta-name { font-size: 12px; font-weight: bold; }
   .meta-desc { font-size: 10px; color: var(--dim); margin-top: 2px; }
   .meta-cost { font-size: 11px; color: var(--yellow); white-space: nowrap; }

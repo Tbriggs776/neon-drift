@@ -91,6 +91,7 @@
     <p>The grid is collapsing. You pilot the last drifter through <strong style="color: var(--cyan)">endless waves of encroaching geometry</strong>. Mini-bosses every 5 waves. The Warden rises every 25. Bank cores between runs to grow stronger.</p>
     <div class="divider"></div>
     <div id="globalStatsBar" class="dim" style="text-align: center; font-size: 11px; letter-spacing: 1px; margin: 8px 0;"></div>
+    <div id="pilotLevelLine" class="pilot-level-line"></div>
     <div class="divider"></div>
     <p class="dim"><strong style="color: var(--pink)">Controls:</strong> <span id="controlsHelp">WASD or arrows to move. Mouse to aim, click to fire. Shift to dash through bullets (brief invuln). Every cleared wave offers an upgrade.</span></p>
     <div id="authBlock" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 12px 0 6px; font-size: 11px; letter-spacing: 1px;">
@@ -112,6 +113,7 @@
       <button class="btn secondary" id="friendsBtn">Friends</button>
       <button class="btn secondary" id="multiplayerBtn">Multiplayer</button>
       <button class="btn secondary hidden" id="profileBtn">Profile</button>
+      <button class="btn secondary" id="shipsBtn">Ships</button>
       <button class="btn secondary" id="metaBtn">Hangar</button>
       <button class="btn secondary" id="resetBtn">Reset</button>
     </div>
@@ -302,6 +304,21 @@
   </div>
 </div>
 
+<!-- Ship + color picker -->
+<div id="shipsScreen" class="overlay hidden" data-nav-back="closeShipsBtn">
+  <div class="card" style="max-width: 900px;">
+    <h1 style="font-size: 38px;">SHIPS</h1>
+    <h2 id="shipsSubtitle">Pilot level 1</h2>
+    <div class="xp-bar"><div class="xp-fill" id="shipsXpFill"></div></div>
+    <p class="dim xp-text" id="shipsXpText"></p>
+    <div class="ship-colors" id="shipColors"></div>
+    <div class="ship-grid" id="shipGrid"></div>
+    <div class="btn-row">
+      <button class="btn secondary" id="closeShipsBtn">Back</button>
+    </div>
+  </div>
+</div>
+
 <!-- Upgrade screen (between waves) -->
 <div id="upgradeScreen" class="overlay hidden">
   <div class="card" style="max-width: 780px; padding: 40px 48px;">
@@ -353,6 +370,7 @@
       </div>
     </div>
     <p class="dim" style="text-align: center;">Banked <span id="dsBanked" style="color: var(--yellow); font-weight: bold;">0</span> cores for the Hangar.</p>
+    <p id="dsXp" class="ds-xp"></p>
     <div class="btn-row">
       <button class="btn" id="retryBtn">New Run</button>
       <button class="btn secondary" id="deathMetaBtn">Hangar</button>

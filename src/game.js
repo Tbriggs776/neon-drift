@@ -66,10 +66,12 @@ import {
   getWorldDims,
   isRunInRoom,
   getFusion,
-  getCurrentRoom
+  getCurrentRoom,
+  setLoadout
 } from './multiplayer.js';
 import { initMenuNav, navGamepadFrame } from './menuNav.js';
 import { initNative } from './native.js';
+import { SHIPS, PILOT_COLORS, PILOT_COLOR_NAMES, getShip, drawShipModel, shipGuns } from './ships.js';
 
 
 // ============================================================
@@ -205,6 +207,9 @@ const STORAGE_KEY = 'neon_drift_meta_v1';
 // ============================================================
 const META_DEFAULTS = {
   bankedCores: 0,
+  xp: 0,             // pilot XP; the level unlocks ships
+  ship: 'glide',     // chosen ship id (ships.js)
+  color: 0,          // chosen pilot color index (PILOT_COLORS)
   totalRuns: 0,
   totalVictories: 0,
   bestScore: 0,
@@ -253,11 +258,63 @@ function loadMeta() {
     for (const k of Object.keys(META_DEFAULTS.nodes)) {
       merged.nodes[k] = Object.assign({}, META_DEFAULTS.nodes[k], parsed.nodes?.[k] || {});
     }
+    // Pilot XP arrived with the ship roster: credit earlier play once.
+    if (parsed.xp === undefined) merged.xp = (merged.totalRuns || 0) * 150 + (merged.bestWave || 0) * 50;
     return merged;
   } catch (e) { return JSON.parse(JSON.stringify(META_DEFAULTS)); }
 }
 function saveMeta() {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(meta)); } catch (e) {}
+}
+
+// ---- Pilot level ----
+// Level L needs 250 * (L - 1)^1.6 total XP: level 3 after a couple of runs,
+// the last ship (level 28) after a few dozen good ones.
+function xpForLevel(level) {
+  return Math.round(250 * Math.pow(level - 1, 1.6));
+}
+function pilotLevel(xp = meta.xp) {
+  let level = 1;
+  while (xpForLevel(level + 1) <= xp) level++;
+  return level;
+}
+function isShipUnlocked(ship) {
+  return pilotLevel() >= ship.level;
+}
+// The chosen ship, falling back to the Glide if it isn't unlocked (or a
+// saved id no longer exists).
+function currentShip() {
+  const ship = getShip(meta.ship);
+  return isShipUnlocked(ship) ? ship : SHIPS[0];
+}
+function currentColor() {
+  return PILOT_COLORS[meta.color] || PILOT_COLORS[0];
+}
+
+// XP for a finished run, solo or multiplayer. Returns a summary line for the
+// end-of-run screen, and toasts any ships the new level unlocked.
+function awardXp(wave, score) {
+  const gained = Math.max(0, Math.round(wave * 50 + score / 100));
+  const before = pilotLevel();
+  meta.xp += gained;
+  saveMeta();
+  const after = pilotLevel();
+  const unlocked = SHIPS.filter((s) => s.level > before && s.level <= after);
+  unlocked.forEach((s, i) => setTimeout(() => toast(`New ship unlocked: ${s.name}`), 600 + i * 1600));
+  refreshPilotLevelLine();
+  let line = `+${gained.toLocaleString()} XP · Pilot level ${after}`;
+  if (after > before) line += ' · LEVEL UP!';
+  if (unlocked.length) line += ` · Unlocked ${unlocked.map((s) => s.name).join(', ')}`;
+  return line;
+}
+
+function refreshPilotLevelLine() {
+  const el = document.getElementById('pilotLevelLine');
+  if (!el) return;
+  const level = pilotLevel();
+  const next = SHIPS.find((s) => s.level > level);
+  el.textContent = `PILOT LV ${level} · ${currentShip().name.toUpperCase()}` +
+    (next ? ` · NEXT SHIP AT LV ${next.level}` : ' · ALL SHIPS UNLOCKED');
 }
 
 function nodeCost(node) {
@@ -348,9 +405,9 @@ let run = null;
 // Client just renders server state and forwards input. Single-player
 // code path is intentionally untouched — this is a parallel system.
 // ============================================================
-// One color per pilot slot (the server assigns slots 0-4), so a pilot looks
-// the same on every screen: ship, name, pips, drones and bullets.
-const PILOT_COLORS = ['#ff2d95', '#00f0ff', '#39ff14', '#bc8cff', '#ff8c1a'];
+// A pilot's color slot indexes PILOT_COLORS (ships.js). In multiplayer the
+// server assigns slots, so a pilot looks the same on every screen: ship,
+// name, pips, drones and bullets.
 function pilotColor(slot) {
   return PILOT_COLORS[(slot || 0) % PILOT_COLORS.length];
 }
@@ -476,6 +533,8 @@ function mpTick(t, dt) {
     }
     run.player.hp = me.hp;
     if (me.maxHp) run.player.maxHp = me.maxHp;
+    run.player.ship = me.ship || currentShip().id;
+    run.player.shieldUp = !!me.shieldUp;
   }
 
   // 2. Predict locally: apply input to our position right now so movement
@@ -736,6 +795,8 @@ function mpUpdateViews(dt) {
     v.angle = mpLerpAngle(v.angle, r.angle || 0, k);
     v.sessionId = r.sessionId;
     v.slot = r.slot;
+    v.ship = r.ship;
+    v.shieldUp = r.shieldUp;
     v.score = r.score;
     if (v.iframes > 0) v.iframes -= dt;
     v.name = r.name;
@@ -1376,6 +1437,10 @@ function newRun(options = {}) {
     waveCleared: false,
     timeElapsed: 0
   };
+  const ship = currentShip();
+  run.player.ship = ship.id;
+  run.player.color = currentColor();
+  applyShipPerks(ship);
   meta.totalRuns++;
   saveMeta();
   updateHUD();
@@ -2572,6 +2637,10 @@ function updatePlayer(dt) {
   if (p.iframes > 0) p.iframes -= dt;
   if (p.invulnDash > 0) p.invulnDash -= dt;
   if (p.dashCD > 0) p.dashCD -= dt;
+  if (p.shieldMax && !p.shieldUp) {
+    p.shieldCD -= dt;
+    if (p.shieldCD <= 0) p.shieldUp = true;
+  }
   if (p.fireFlash > 0) p.fireFlash -= dt;
 
   // Handle dash request (one-shot)
@@ -2700,6 +2769,23 @@ function firePlayer() {
 // ============================================================
 // DRONES (orbiting friendly gunners)
 // ============================================================
+// Single-player ship perks (shared/ships.json); the multiplayer server
+// applies the same numbers in NeonDriftRoom.
+function applyShipPerks(ship) {
+  const s = ship.stats || {};
+  const p = run.player;
+  if (s.hp) { p.maxHp = Math.max(1, p.maxHp + s.hp); p.hp = p.maxHp; }
+  if (s.speed) p.speed *= s.speed;
+  if (s.dashCD) p.dashMax *= s.dashCD;
+  if (s.fireRate) run.weapons.fireRate /= s.fireRate;
+  if (s.damage) run.weapons.damage *= s.damage;
+  if (s.pierce) run.weapons.pierce += s.pierce;
+  if (s.crit) run.weapons.crit += s.crit;
+  if (s.magnet) run.passives.magnetRadius *= s.magnet;
+  if (s.shield) { p.shieldMax = s.shield; p.shieldCD = 0; p.shieldUp = true; }
+  for (let i = 0; i < (s.drones || 0); i++) spawnDrone();
+}
+
 function spawnDrone() {
   run.drones.push({
     orbitAngle: Math.random() * Math.PI * 2,
@@ -3880,6 +3966,15 @@ function updateEnemyProjectiles(dt) {
 
 function damagePlayer(amt) {
   if (run.player.iframes > 0 || run.player.invulnDash > 0) return;
+  // Royal's deflector soaks the hit, then recharges.
+  if (run.player.shieldUp) {
+    run.player.shieldUp = false;
+    run.player.shieldCD = run.player.shieldMax;
+    run.player.iframes = 0.6;
+    run.screenShake = 6;
+    spawnExplosion(run.player.x, run.player.y, '#7fdcff', 26);
+    return;
+  }
   run.player.hp -= amt;
   run.player.iframes = 1.0;
   run.screenShake = 14;
@@ -4260,7 +4355,7 @@ function render() {
   }
 
   // Player projectiles
-  for (const pr of run.projectiles) drawPlayerBullet(pr);
+  for (const pr of run.projectiles) drawPlayerBullet(pr, run.player.color);
 
   // Remote multiplayer pilots (drawn before local player so yours renders on top)
   drawRemotePlayers();
@@ -4416,9 +4511,10 @@ function drawRemotePlayers() {
   }
 }
 
-// Draws a ship with trail, thruster and banking. Multiplayer passes each
-// pilot's ship object and color; single player draws run.player in pink.
-function drawPlayer(p = run.player, hullColor = '#ff2d95') {
+// Draws a pilot's ship (p.ship, see ships.js) with its engine trail, banking,
+// hit blink, muzzle flash and shields. Multiplayer passes each pilot's ship
+// view and color; single player draws run.player in the chosen color.
+function drawPlayer(p = run.player, hullColor = run.player.color || '#ff2d95') {
 
   // ─── Engine trail (drawn first, behind ship) ───
   if (p.trail.length > 2) {
@@ -4429,10 +4525,11 @@ function drawPlayer(p = run.player, hullColor = '#ff2d95') {
       // Skip segments that jump (screen wrap, a dash, a network snap) so the
       // trail never draws a line across the screen.
       if (Math.abs(t.x - prev.x) > 60 || Math.abs(t.y - prev.y) > 60) continue;
-      const alpha = (i / p.trail.length) * 0.5;
-      const width = (i / p.trail.length) * 8;
-      ctx.strokeStyle = `rgba(0, 240, 255, ${alpha})`;
-      ctx.shadowColor = '#00f0ff';
+      const alpha = (i / p.trail.length) * 0.4;
+      const width = (i / p.trail.length) * 7;
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = hullColor;
+      ctx.shadowColor = hullColor;
       ctx.shadowBlur = 12;
       ctx.lineWidth = width;
       ctx.lineCap = 'round';
@@ -4455,139 +4552,36 @@ function drawPlayer(p = run.player, hullColor = '#ff2d95') {
 
   const dashing = p.invulnDash > 0;
   const flash = p.iframes > 0 && !dashing && Math.floor(p.iframes * 20) % 2 === 0;
-  const primary = dashing ? '#00f0ff' : hullColor;
-  const accent = dashing ? '#ffffff' : '#00f0ff';
+  const moving = Math.hypot(p.x - p.lastX, p.y - p.lastY) > 0.5;
+  const shipId = p.ship || 'glide';
+  drawShipModel(ctx, shipId, hullColor, performance.now() / 1000, { flash, thrust: moving ? 1 : 0.5 });
 
-  // ─── Thruster plume (behind ship) ───
-  const pulse = 1 + Math.sin(p.enginePulse) * 0.15;
-  const plumeLen = (12 + Math.sin(p.enginePulse * 2) * 3) * pulse;
-  ctx.save();
-  ctx.shadowColor = accent;
-  ctx.shadowBlur = 20;
-  // Outer glow plume
-  const plumeGrad = ctx.createLinearGradient(-8, 0, -8 - plumeLen, 0);
-  plumeGrad.addColorStop(0, 'rgba(0, 240, 255, 0.9)');
-  plumeGrad.addColorStop(0.5, 'rgba(184, 71, 255, 0.6)');
-  plumeGrad.addColorStop(1, 'rgba(255, 45, 149, 0)');
-  ctx.fillStyle = plumeGrad;
-  ctx.beginPath();
-  ctx.moveTo(-8, -5);
-  ctx.lineTo(-8 - plumeLen, 0);
-  ctx.lineTo(-8, 5);
-  ctx.closePath();
-  ctx.fill();
-  // Inner bright core of thrust
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-  ctx.beginPath();
-  ctx.moveTo(-8, -2);
-  ctx.lineTo(-8 - plumeLen * 0.5, 0);
-  ctx.lineTo(-8, 2);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
-
-  // ─── Hull fill (dark base) ───
-  ctx.shadowColor = primary;
-  ctx.shadowBlur = 18;
-  ctx.fillStyle = flash ? 'rgba(255,255,255,0.4)' : 'rgba(26, 11, 46, 0.85)';
-  ctx.strokeStyle = flash ? '#ffffff' : primary;
-  ctx.lineWidth = 2;
-
-  // Main body: angular delta-wing shape (arrow forward + swept wings)
-  ctx.beginPath();
-  ctx.moveTo(18, 0);           // nose tip
-  ctx.lineTo(6, -4);           // upper neck
-  ctx.lineTo(2, -14);          // upper wing tip
-  ctx.lineTo(-8, -12);         // upper wing trailing
-  ctx.lineTo(-10, -5);         // fuselage upper
-  ctx.lineTo(-8, 0);            // tail center
-  ctx.lineTo(-10, 5);          // fuselage lower
-  ctx.lineTo(-8, 12);          // lower wing trailing
-  ctx.lineTo(2, 14);           // lower wing tip
-  ctx.lineTo(6, 4);            // lower neck
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-
-  // ─── Tron light ribbons along hull edges ───
-  ctx.save();
-  ctx.shadowColor = accent;
-  ctx.shadowBlur = 14;
-  ctx.strokeStyle = accent;
-  ctx.lineWidth = 1.5;
-  // Upper wing edge stripe
-  ctx.beginPath();
-  ctx.moveTo(14, -2);
-  ctx.lineTo(4, -12);
-  ctx.lineTo(-6, -10);
-  ctx.stroke();
-  // Lower wing edge stripe
-  ctx.beginPath();
-  ctx.moveTo(14, 2);
-  ctx.lineTo(4, 12);
-  ctx.lineTo(-6, 10);
-  ctx.stroke();
-  // Spine line
-  ctx.lineWidth = 1;
-  ctx.globalAlpha = 0.6;
-  ctx.beginPath();
-  ctx.moveTo(16, 0);
-  ctx.lineTo(-8, 0);
-  ctx.stroke();
-  ctx.restore();
-
-  // ─── Dual cannons (little barrels at wing leading edges) ───
-  ctx.save();
-  ctx.fillStyle = '#1a0b2e';
-  ctx.strokeStyle = accent;
-  ctx.lineWidth = 1;
-  ctx.shadowColor = accent;
-  ctx.shadowBlur = 6;
-  // Upper cannon
-  ctx.fillRect(6, -9, 7, 3);
-  ctx.strokeRect(6, -9, 7, 3);
-  // Lower cannon
-  ctx.fillRect(6, 6, 7, 3);
-  ctx.strokeRect(6, 6, 7, 3);
-  ctx.restore();
-
-  // ─── Muzzle flash at cannon tips when firing ───
+  // ─── Muzzle flash at the ship's gun points when firing ───
   if (p.fireFlash > 0) {
     const fa = p.fireFlash / 0.08;
     ctx.save();
-    ctx.shadowColor = '#ffea00';
-    ctx.shadowBlur = 20;
-    ctx.fillStyle = `rgba(255, 234, 0, ${fa})`;
-    ctx.beginPath(); ctx.arc(13, -7.5, 4 * fa, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(13, 7.5, 4 * fa, 0, Math.PI * 2); ctx.fill();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.shadowColor = hullColor;
+    ctx.shadowBlur = 16;
+    ctx.fillStyle = `rgba(255, 255, 255, ${fa})`;
+    for (const [gx, gy] of shipGuns(shipId)) {
+      ctx.beginPath(); ctx.arc(gx + 2, gy, 3 * fa, 0, Math.PI * 2); ctx.fill();
+    }
     ctx.restore();
   }
 
-  // ─── Rotating core reactor (center, pulses with fire rate) ───
-  ctx.save();
-  const coreRotation = p.enginePulse * 0.5;
-  const coreSize = 3 + Math.sin(p.enginePulse * 3) * 0.6;
-  ctx.shadowColor = accent;
-  ctx.shadowBlur = 18;
-  // Outer rotating hex
-  ctx.strokeStyle = accent;
-  ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  for (let i = 0; i < 6; i++) {
-    const a = (i / 6) * Math.PI * 2 + coreRotation;
-    const x = Math.cos(a) * (coreSize + 1.5);
-    const y = Math.sin(a) * (coreSize + 1.5);
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  // ─── Royal's deflector bubble while it's charged ───
+  if (p.shieldUp) {
+    ctx.save();
+    const pulse = 0.55 + Math.sin(p.enginePulse * 0.7) * 0.15;
+    ctx.strokeStyle = `rgba(127, 220, 255, ${pulse})`;
+    ctx.fillStyle = `rgba(127, 220, 255, ${pulse * 0.12})`;
+    ctx.shadowColor = '#7fdcff';
+    ctx.shadowBlur = 14;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.restore();
   }
-  ctx.closePath();
-  ctx.stroke();
-  // Inner bright core
-  ctx.fillStyle = '#ffffff';
-  ctx.shadowBlur = 25;
-  ctx.beginPath();
-  ctx.arc(0, 0, coreSize, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
 
   // ─── Holographic shield ring (only during dash i-frames) ───
   if (dashing) {
@@ -5382,7 +5376,87 @@ function gameOver() {
   document.getElementById('dsCores').textContent = run.cores;
   document.getElementById('dsCombo').textContent = run.bestCombo;
   document.getElementById('dsBanked').textContent = banked;
+  document.getElementById('dsXp').textContent = awardXp(run.waveNum, run.score);
   document.getElementById('deathScreen').classList.remove('hidden');
+}
+
+// ---- Ships screen: pick a ship and a pilot color ----
+function drawShipCard(canvas, ship, color) {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = canvas.clientWidth || 150, h = canvas.clientHeight || 100;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const g = canvas.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = '#0a0514';
+  g.fillRect(0, 0, w, h);
+  g.strokeStyle = 'rgba(184, 71, 255, 0.12)';
+  g.lineWidth = 1;
+  for (let x = 0; x < w; x += 24) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); }
+  for (let y = 0; y < h; y += 24) { g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); }
+  g.translate(w / 2 + 4, h / 2);
+  g.rotate(-0.3);
+  drawShipModel(g, ship.id, color, 1.3, { scale: Math.min(w, h) / 52 });
+}
+
+function openShips() {
+  const level = pilotLevel();
+  const nextXp = xpForLevel(level + 1), baseXp = xpForLevel(level);
+  document.getElementById('shipsSubtitle').textContent = `Pilot level ${level}`;
+  document.getElementById('shipsXpFill').style.width = `${Math.min(100, ((meta.xp - baseXp) / (nextXp - baseXp)) * 100)}%`;
+  document.getElementById('shipsXpText').textContent =
+    `${meta.xp.toLocaleString()} XP · ${(nextXp - meta.xp).toLocaleString()} to level ${level + 1}`;
+
+  const colors = document.getElementById('shipColors');
+  colors.innerHTML = '';
+  PILOT_COLORS.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.className = 'ship-color';
+    b.id = 'shipColor' + i;
+    b.style.setProperty('--c', c);
+    b.title = PILOT_COLOR_NAMES[i];
+    b.setAttribute('aria-label', PILOT_COLOR_NAMES[i]);
+    b.setAttribute('aria-pressed', i === meta.color ? 'true' : 'false');
+    b.onclick = () => { meta.color = i; saveMeta(); syncLoadout(); openShips(); };
+    colors.appendChild(b);
+  });
+
+  const grid = document.getElementById('shipGrid');
+  grid.innerHTML = '';
+  const chosen = currentShip().id;
+  for (const ship of SHIPS) {
+    const unlocked = level >= ship.level;
+    const b = document.createElement('button');
+    b.className = 'ship-card' + (unlocked ? '' : ' locked');
+    b.id = 'shipCard-' + ship.id;
+    b.setAttribute('aria-pressed', ship.id === chosen ? 'true' : 'false');
+    b.innerHTML = `<canvas></canvas>
+      <div class="ship-info">
+        <div class="ship-name">${ship.name.toUpperCase()}</div>
+        <div class="ship-style">${unlocked ? ship.style : 'Locked · LV ' + ship.level}</div>
+        <div class="ship-perk">${ship.perk}</div>
+      </div>`;
+    if (unlocked) {
+      b.onclick = () => { meta.ship = ship.id; saveMeta(); syncLoadout(); refreshPilotLevelLine(); openShips(); };
+    } else {
+      b.disabled = true;
+    }
+    grid.appendChild(b);
+  }
+  hideAll();
+  document.getElementById('shipsScreen').classList.remove('hidden');
+  // Draw after the screen is visible so the canvases have their real size.
+  requestAnimationFrame(() => {
+    for (const ship of SHIPS) {
+      const c = document.querySelector(`#shipCard-${ship.id} canvas`);
+      if (c) drawShipCard(c, ship, currentColor());
+    }
+  });
+}
+
+// Tell the multiplayer room about a ship or color change (no-op outside one).
+function syncLoadout() {
+  setLoadout(currentShip().id, meta.color);
 }
 
 function openMeta() {
@@ -5423,11 +5497,17 @@ function openMeta() {
 // ============================================================
 document.getElementById('startBtn').onclick = () => { hideAll(); newRun(); };
 document.getElementById('metaBtn').onclick = openMeta;
+document.getElementById('shipsBtn').onclick = openShips;
+document.getElementById('closeShipsBtn').onclick = () => { hideAll(); document.getElementById('titleScreen').classList.remove('hidden'); };
+refreshPilotLevelLine();
+syncLoadout();
 document.getElementById('closeMetaBtn').onclick = () => { hideAll(); document.getElementById('titleScreen').classList.remove('hidden'); };
 document.getElementById('resetBtn').onclick = () => {
   if (confirm('Wipe all meta progress?')) {
     localStorage.removeItem(STORAGE_KEY);
     meta = loadMeta();
+    refreshPilotLevelLine();
+    syncLoadout();
     alert('Progress reset.');
   }
 };
@@ -5651,7 +5731,7 @@ document.getElementById('abandonBtn').onclick = () => {
       mpRoomCode.textContent = state.code || '------';
       mpPlayerList.innerHTML = state.players.map((p) => `
         <div style="display: flex; justify-content: space-between; padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.05);">
-          <span style="color: ${pilotColor(p.slot)};"><span style="display: inline-block; width: 8px; height: 8px; margin-right: 6px; background: ${pilotColor(p.slot)}; box-shadow: 0 0 6px ${pilotColor(p.slot)};"></span>${escapeHtml(p.name)} ${p.isHost ? '<span style="color: var(--yellow);">[host]</span>' : ''} ${p.isMe ? '<span class="dim">(you)</span>' : ''}</span>
+          <span style="color: ${pilotColor(p.slot)};"><span style="display: inline-block; width: 8px; height: 8px; margin-right: 6px; background: ${pilotColor(p.slot)}; box-shadow: 0 0 6px ${pilotColor(p.slot)};"></span>${escapeHtml(p.name)} <span class="dim">· ${escapeHtml(getShip(p.ship).name)}</span> ${p.isHost ? '<span style="color: var(--yellow);">[host]</span>' : ''} ${p.isMe ? '<span class="dim">(you)</span>' : ''}</span>
           <span style="color: ${p.ready ? '#39ff14' : 'var(--dim)'};">${p.ready ? 'READY' : 'not ready'}</span>
         </div>
       `).join('');
@@ -5752,6 +5832,7 @@ document.getElementById('abandonBtn').onclick = () => {
     document.getElementById('dsCores').textContent = '—';
     document.getElementById('dsCombo').textContent = '—';
     document.getElementById('dsBanked').textContent = '0';
+    document.getElementById('dsXp').textContent = awardXp(waveReached || 1, getMyScore());
     document.getElementById('deathScreen').classList.remove('hidden');
     // Submit MY personal score to the leaderboard. Anon submissions still
     // work; signed-in submissions get attributed to the user_id.
@@ -5814,6 +5895,9 @@ document.getElementById('abandonBtn').onclick = () => {
       playSound('bosswarn');
     } else if (msg.type === 'waveStart') {
       announceWave(msg.wave, msg.kind, msg.name);
+    } else if (msg.type === 'shieldBreak') {
+      spawnExplosion(msg.x, msg.y, '#7fdcff', 26);
+      if (msg.sid === getCurrentRoom()?.sessionId) run.screenShake = 6;
     } else if (msg.type === 'burst') {
       spawnExplosion(msg.x, msg.y, msg.color || '#ff2d95', 30);
     } else if (msg.type === 'shockwave') {

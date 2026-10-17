@@ -43,6 +43,7 @@ function snapshot() {
       ready: p.ready,
       isHost: p.isHost,
       slot: p.slot || 0,
+      ship: p.ship || 'glide',
       isMe: sid === mySession
     });
   });
@@ -132,12 +133,20 @@ function wireRoom(room) {
   emit();
 }
 
+// The local pilot's ship and color, sent when creating or joining a room and
+// again whenever they change in the lobby.
+let loadout = { ship: 'glide', color: 0 };
+export function setLoadout(ship, color) {
+  loadout = { ship, color };
+  if (currentRoom && !currentRoom.state?.started) currentRoom.send('setLoadout', loadout);
+}
+
 // ---- Actions ----
 export async function createRoom(name) {
   if (!client) return { error: { message: 'Multiplayer offline' } };
   if (currentRoom) return { error: { message: 'Already in a room' } };
   try {
-    const room = await client.create('neondrift', { name: name || 'Pilot' });
+    const room = await client.create('neondrift', { name: name || 'Pilot', ...loadout });
     wireRoom(room);
     return { room };
   } catch (e) {
@@ -154,7 +163,7 @@ export async function joinRoomByCode(code, name) {
     const rooms = await client.getAvailableRooms('neondrift');
     const match = rooms.find((r) => r.metadata && r.metadata.code === target);
     if (!match) return { error: { message: 'Room not found' } };
-    const room = await client.joinById(match.roomId, { name: name || 'Pilot' });
+    const room = await client.joinById(match.roomId, { name: name || 'Pilot', ...loadout });
     wireRoom(room);
     return { room };
   } catch (e) {
@@ -216,6 +225,8 @@ export function getRemotePlayers() {
       dead: p.dead,
       isHost: p.isHost,
       slot: p.slot || 0,
+      ship: p.ship || 'glide',
+      shieldUp: !!p.shieldUp,
       score: p.score || 0,
       droneCount: p.droneCount || 0
     });

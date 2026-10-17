@@ -1,12 +1,15 @@
 const { Room } = require('colyseus');
 const { Schema, MapSchema, type } = require('@colyseus/schema');
 const { ENEMY_DEFS, isBoss, getWaveInfo, makeEnemy, updateEnemyAI } = require('./enemies');
+// Ship perks, shared with the client (src/ships.js reads the same file).
+const SHIPS = require('../../shared/ships.json');
 
 // ============================================================
 // Server-authoritative dimensions. Clients render in their own
 // canvas size and rescale incoming positions from this world.
 // ============================================================
 const MAX_PILOTS = 5;
+const PILOT_COLOR_COUNT = 8; // matches PILOT_COLORS in src/ships.js
 const WORLD_W = 1280;
 const WORLD_H = 720;
 const TICK_HZ = 30;
@@ -34,9 +37,11 @@ class Player extends Schema {
     this.name = '';
     this.ready = false;
     this.isHost = false;
-    // Color slot 0..MAX_PILOTS-1, fixed for the session so every screen
-    // shows the same pilot in the same color.
+    // Color index into the client's PILOT_COLORS. Each pilot's choice when
+    // it's free, so every screen shows the same pilot in the same color.
     this.slot = 0;
+    this.ship = 'glide';
+    this.shieldUp = false; // Royal's deflector is charged
     this.x = WORLD_W / 2;
     this.y = WORLD_H / 2;
     this.angle = 0;
@@ -81,11 +86,36 @@ function resetRunStats(p) {
   p.shockwave = false;
   p.leech = false;
   p.coresSinceHeal = 0;
+  p.dashMul = 1;
+  p.shieldMax = 0;
+  p.shieldCD = 0;
+  p.shieldUp = false;
+}
+
+function shipById(id) {
+  return SHIPS.find((s) => s.id === id) || SHIPS[0];
+}
+
+// Same perk numbers the client applies in single player (applyShipPerks).
+function applyShipPerks(p) {
+  const s = shipById(p.ship).stats || {};
+  if (s.hp) { p.maxHp = Math.max(1, p.maxHp + s.hp); p.hp = p.maxHp; }
+  if (s.speed) p.speedMul *= s.speed;
+  if (s.dashCD) p.dashMul *= s.dashCD;
+  if (s.fireRate) p.fireRateMul *= s.fireRate;
+  if (s.damage) p.damageMul *= s.damage;
+  if (s.pierce) p.pierce += s.pierce;
+  if (s.crit) p.critChance += s.crit;
+  if (s.magnet) p.magnetMul *= s.magnet;
+  if (s.drones) p.droneCount += s.drones;
+  if (s.shield) { p.shieldMax = s.shield; p.shieldUp = true; }
 }
 type('string')(Player.prototype, 'name');
 type('boolean')(Player.prototype, 'ready');
 type('boolean')(Player.prototype, 'isHost');
 type('int8')(Player.prototype, 'slot');
+type('string')(Player.prototype, 'ship');
+type('boolean')(Player.prototype, 'shieldUp');
 type('float32')(Player.prototype, 'x');
 type('float32')(Player.prototype, 'y');
 type('float32')(Player.prototype, 'angle');
@@ -340,6 +370,16 @@ class NeonDriftRoom extends Room {
       p.name = String(name || '').slice(0, 20);
     });
 
+    this.onMessage('setLoadout', (client, payload) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p || this.state.started) return;
+      p.ship = shipById(payload?.ship).id;
+      const color = Number(payload?.color);
+      if (Number.isInteger(color) && color >= 0 && color < PILOT_COLOR_COUNT && !this.colorTaken(color, p)) {
+        p.slot = color;
+      }
+    });
+
     this.onMessage('setReady', (client, ready) => {
       const p = this.state.players.get(client.sessionId);
       if (!p || this.state.started) return;
@@ -378,7 +418,7 @@ class NeonDriftRoom extends Room {
       p.x = wrap(p.x + dx * 120, WORLD_W);
       p.y = wrap(p.y + dy * 120, WORLD_H);
       p.iframes = 0.35;
-      p.dashCD = 1.0;
+      p.dashCD = 1.0 * (p.dashMul || 1);
       this.broadcast('fx', { type: 'dash', x: p.x, y: p.y });
     });
 
@@ -434,6 +474,7 @@ class NeonDriftRoom extends Room {
         pl.pickedUpgrade = false;
         pl.pendingChoices = null;
         resetRunStats(pl);
+        applyShipPerks(pl);
       });
       this.upgradePhase = false;
       this.startWave(1);
@@ -450,12 +491,23 @@ class NeonDriftRoom extends Room {
       ? String(options.name).slice(0, 20)
       : 'Pilot';
     player.isHost = this.state.players.size === 0;
-    const taken = new Set();
-    this.state.players.forEach((p) => taken.add(p.slot));
-    for (let i = 0; i < MAX_PILOTS; i++) {
-      if (!taken.has(i)) { player.slot = i; break; }
+    player.ship = shipById(options && options.ship).id;
+    // The pilot's chosen color if nobody has it, else the first free one.
+    const wanted = Number(options && options.color);
+    if (Number.isInteger(wanted) && wanted >= 0 && wanted < PILOT_COLOR_COUNT && !this.colorTaken(wanted)) {
+      player.slot = wanted;
+    } else {
+      for (let i = 0; i < PILOT_COLOR_COUNT; i++) {
+        if (!this.colorTaken(i)) { player.slot = i; break; }
+      }
     }
     this.state.players.set(client.sessionId, player);
+  }
+
+  colorTaken(color, except) {
+    let taken = false;
+    this.state.players.forEach((p) => { if (p !== except && p.slot === color) taken = true; });
+    return taken;
   }
 
   onLeave(client) {
@@ -536,6 +588,10 @@ class NeonDriftRoom extends Room {
       if (p.iframes > 0) p.iframes = Math.max(0, p.iframes - dt);
       p.fireCD = Math.max(0, (p.fireCD || 0) - dt);
       p.dashCD = Math.max(0, (p.dashCD || 0) - dt);
+      if (p.shieldMax && !p.shieldUp && !p.dead) {
+        p.shieldCD -= dt;
+        if (p.shieldCD <= 0) p.shieldUp = true;
+      }
       if (p.dead) return;
       const inp = this.playerInput.get(sid);
       if (!inp) return;
@@ -818,6 +874,14 @@ class NeonDriftRoom extends Room {
   }
 
   hurtPlayer(p, sid) {
+    // Royal's deflector soaks the hit, then recharges.
+    if (p.shieldUp) {
+      p.shieldUp = false;
+      p.shieldCD = p.shieldMax;
+      p.iframes = 0.6;
+      this.broadcast('fx', { type: 'shieldBreak', x: p.x, y: p.y, sid });
+      return;
+    }
     p.hp -= 1;
     p.iframes = 1.0;
     if (p.hp <= 0) p.dead = true;
