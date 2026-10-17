@@ -2110,6 +2110,27 @@ function readInput() {
   input.firing = mouseDown;
 }
 
+// Screen wrap: once the ship fully leaves one edge it reappears on the
+// opposite one. If the far side is blocked by an obstacle, the ship stops at
+// the edge instead. lastX/lastY shift with it so banking doesn't spike.
+function wrapPlayer(p) {
+  let nx = p.x, ny = p.y;
+  if (nx < -p.r) nx += W + 2 * p.r;
+  else if (nx > W + p.r) nx -= W + 2 * p.r;
+  if (ny < -p.r) ny += H + 2 * p.r;
+  else if (ny > H + p.r) ny -= H + 2 * p.r;
+  if (nx === p.x && ny === p.y) return;
+  if (isInsideObstacle(nx, ny, p.r)) {
+    p.x = Math.max(-p.r, Math.min(W + p.r, p.x));
+    p.y = Math.max(-p.r, Math.min(H + p.r, p.y));
+    return;
+  }
+  p.lastX += nx - p.x;
+  p.lastY += ny - p.y;
+  p.x = nx;
+  p.y = ny;
+}
+
 function tryDash() {
   if (run.player.dashCD > 0) return;
   let vx = input.moveX, vy = input.moveY;
@@ -2127,8 +2148,9 @@ function tryDash() {
   const targetY = p.y + vy * 120;
   // Dash still respects walls but slides along them
   const resolved = resolveCircleMove(fromX, fromY, targetX, targetY, p.r);
-  p.x = Math.max(p.r, Math.min(W - p.r, resolved.x));
-  p.y = Math.max(p.r, Math.min(H - p.r, resolved.y));
+  p.x = resolved.x;
+  p.y = resolved.y;
+  wrapPlayer(p);
   p.invulnDash = 0.35;
   p.iframes = Math.max(p.iframes, 0.35);
   p.dashCD = p.dashMax;
@@ -2213,9 +2235,7 @@ function updatePlayer(dt) {
   const resolved = resolveCircleMove(p.x, p.y, targetX, targetY, p.r);
   p.x = resolved.x;
   p.y = resolved.y;
-  // Clamp to canvas edges
-  p.x = Math.max(p.r, Math.min(W - p.r, p.x));
-  p.y = Math.max(p.r, Math.min(H - p.r, p.y));
+  wrapPlayer(p);
   p.angle = input.aimAngle;
 
   // Compute movement speed for trail intensity
@@ -4085,6 +4105,8 @@ function drawPlayer() {
     for (let i = 1; i < p.trail.length; i++) {
       const t = p.trail[i];
       const prev = p.trail[i - 1];
+      // Don't draw the segment where the ship wrapped across the screen.
+      if (Math.abs(t.x - prev.x) > W / 2 || Math.abs(t.y - prev.y) > H / 2) continue;
       const alpha = (i / p.trail.length) * 0.5;
       const width = (i / p.trail.length) * 8;
       ctx.strokeStyle = `rgba(0, 240, 255, ${alpha})`;
