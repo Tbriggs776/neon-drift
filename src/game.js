@@ -18,10 +18,12 @@ import {
   requestPasswordReset,
   updatePassword,
   signOut,
+  deleteAccount,
   setProfileDisplayName,
   isSignedIn,
   getSession,
-  getProfile
+  getProfile,
+  handleAuthDeepLink
 } from './auth.js';
 import {
   searchUsers,
@@ -64,6 +66,8 @@ import {
   getWorldDims,
   isRunInRoom
 } from './multiplayer.js';
+import { initMenuNav, navGamepadFrame } from './menuNav.js';
+import { initNative } from './native.js';
 
 
 // ============================================================
@@ -1567,6 +1571,8 @@ window.addEventListener('keydown', (e) => {
   keys[e.key.toLowerCase()] = true;
   if (input.mode !== 'touch') setInputMode('kbm');
   if (e.key === 'Escape' && run && run.active) {
+    // Marks the key as used so menu nav doesn't also treat it as Back.
+    e.preventDefault();
     togglePause();
   }
   if ((e.key === 'Shift') && run && run.active && !run.paused) {
@@ -1592,6 +1598,20 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mousedown', () => { mouseDown = true; if (input.mode !== 'touch') setInputMode('kbm'); });
 canvas.addEventListener('mouseup', () => { mouseDown = false; });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// Controller / TV remote / arrow-key navigation for every overlay menu.
+// Registered after the keydown handler above so it sees Escape's defaultPrevented.
+initMenuNav();
+
+// iOS / Android apps: auth deep links, hardware Back button, Android TV layout.
+// Back with no menu open pauses a live run, same as Escape.
+initNative({
+  onDeepLink: handleAuthDeepLink,
+  onBack: () => {
+    if (run && run.active && !run.paused) { togglePause(); return true; }
+    return false;
+  }
+});
 
 // --- Touch ---
 function handleTouchStart(e) {
@@ -1778,6 +1798,7 @@ function pollGamepad() {
   }
   const gp = pads && pads[gamepadIndex];
   if (!gp) return false;
+  navGamepadFrame(gp, performance.now());
 
   // Detect if gamepad is being used this frame
   const lx = deadzone(gp.axes[0] || 0);
@@ -1794,7 +1815,8 @@ function pollGamepad() {
   const startBtn = gp.buttons[9] ? gp.buttons[9].pressed : false; // Start (pause)
 
   const anyAxisActive = Math.abs(lx) + Math.abs(ly) + Math.abs(rx) + Math.abs(ry) > 0.05;
-  const anyBtnActive = rt > 0.1 || lt > 0.1 || aBtn || bBtn || xBtn || yBtn || lbBtn || startBtn;
+  const dpadActive = [12, 13, 14, 15].some(i => gp.buttons[i] && gp.buttons[i].pressed);
+  const anyBtnActive = rt > 0.1 || lt > 0.1 || aBtn || bBtn || xBtn || yBtn || lbBtn || startBtn || dpadActive;
 
   if (anyAxisActive || anyBtnActive) {
     if (input.mode !== 'gamepad') setInputMode('gamepad');
@@ -5419,6 +5441,11 @@ document.getElementById('abandonBtn').onclick = () => {
   const profileUpdatePasswordBtn = document.getElementById('profileUpdatePasswordBtn');
   const profileSignOutBtn = document.getElementById('profileSignOutBtn');
   const closeProfileBtn = document.getElementById('closeProfileBtn');
+  const profileDeleteBtn = document.getElementById('profileDeleteBtn');
+  const profileDeleteConfirm = document.getElementById('profileDeleteConfirm');
+  const profileDeleteMsg = document.getElementById('profileDeleteMsg');
+  const profileDeleteConfirmBtn = document.getElementById('profileDeleteConfirmBtn');
+  const profileDeleteCancelBtn = document.getElementById('profileDeleteCancelBtn');
 
   function openProfile() {
     if (!isSignedIn()) return;
@@ -5433,6 +5460,9 @@ document.getElementById('abandonBtn').onclick = () => {
     profileConfirmPassword.value = '';
     profilePasswordMsg.textContent = '';
     profilePasswordMsg.style.color = '';
+    profileDeleteConfirm.classList.add('hidden');
+    profileDeleteBtn.classList.remove('hidden');
+    profileDeleteMsg.textContent = '';
   }
   function closeProfile() {
     hideAll();
@@ -5493,6 +5523,38 @@ document.getElementById('abandonBtn').onclick = () => {
       await signOut();
       profileSignOutBtn.disabled = false;
       closeProfile();
+    };
+  }
+
+  // Account deletion (required by the App Store for apps with sign-up).
+  // Two steps: Delete Account reveals the warning, Delete Forever commits.
+  if (profileDeleteBtn) {
+    profileDeleteBtn.onclick = () => {
+      profileDeleteBtn.classList.add('hidden');
+      profileDeleteConfirm.classList.remove('hidden');
+      profileDeleteCancelBtn.focus();
+    };
+    profileDeleteCancelBtn.onclick = () => {
+      profileDeleteConfirm.classList.add('hidden');
+      profileDeleteBtn.classList.remove('hidden');
+      profileDeleteMsg.textContent = '';
+      profileDeleteBtn.focus();
+    };
+    profileDeleteConfirmBtn.onclick = async () => {
+      profileDeleteConfirmBtn.disabled = true;
+      profileDeleteCancelBtn.disabled = true;
+      profileDeleteMsg.textContent = 'Deleting...';
+      profileDeleteMsg.style.color = '';
+      const { error } = await deleteAccount();
+      profileDeleteConfirmBtn.disabled = false;
+      profileDeleteCancelBtn.disabled = false;
+      if (error) {
+        profileDeleteMsg.textContent = error.message || 'Delete failed';
+        profileDeleteMsg.style.color = 'var(--red, #ff4d6d)';
+        return;
+      }
+      closeProfile();
+      toast('Account deleted');
     };
   }
 

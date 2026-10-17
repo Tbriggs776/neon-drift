@@ -10,6 +10,7 @@ Roguelike synthwave bullet hell. Endless waves, mini-bosses every 5, Warden ever
 - **Host**: Vercel
 - **Audio**: MP3 assets served from CDN
 - **PWA**: Service worker + manifest for offline play and home-screen install
+- **Native apps**: Capacitor 8 wraps the same build for iPhone, iPad, Android phones and tablets, and Android TV
 
 ## Project Structure
 
@@ -20,7 +21,8 @@ neon-drift/
 │   ├── game.js             # Main game loop and logic
 │   ├── leaderboard.js      # Supabase client + score submission
 │   ├── styles.css          # All game styles
-│   └── body.html           # Body markup snippet (imported into index.html at build)
+│   ├── menuNav.js          # Gamepad / TV remote / arrow-key menu navigation
+│   └── native.js           # Capacitor glue: deep links, Back button, TV mode
 ├── public/
 │   ├── audio/              # Sound effects and background music (MP3)
 │   ├── icon-192.png        # PWA icon
@@ -29,6 +31,10 @@ neon-drift/
 │   └── sw.js               # Service worker
 ├── supabase/
 │   └── schema.sql          # Database schema + RLS policies
+├── android/                # Android + Android TV app (Capacitor)
+├── ios/                    # iPhone + iPad app (Capacitor)
+├── assets/                 # Source images for native icons + splash screens
+├── capacitor.config.json   # App ID, name, native options
 ├── package.json
 ├── vite.config.js
 ├── vercel.json             # Vercel deploy config + caching headers
@@ -175,10 +181,57 @@ The service worker caches:
 
 Supabase API calls are never cached so leaderboard data is always fresh.
 
+## Native Apps (iPhone, iPad, Android, Android TV)
+
+The web build is wrapped with [Capacitor](https://capacitorjs.com). App ID: `com.tylerbriggs.neondrift`.
+
+| Platform | Project | Notes |
+|---|---|---|
+| iPhone + iPad | `ios/` | One universal app, Swift Package Manager (no CocoaPods) |
+| Android phone + tablet | `android/` | |
+| Android TV, Google TV, Fire TV (Fire OS) | `android/` | Same APK. TV launcher banner, remote and gamepad navigation |
+| Apple TV | not supported | tvOS has no web view. AirPlay from iPhone or iPad works |
+
+### What you need
+
+- **iOS**: a Mac with Xcode 16 or newer, and an Apple Developer account ($99/yr) for TestFlight and the App Store
+- **Android**: Android Studio (it installs the SDK), and a Google Play developer account ($25 once)
+
+### Everyday workflow
+
+```bash
+npm run cap:sync   # vite build, then copy dist/ into both native projects
+npm run ios        # sync, then open Xcode
+npm run android    # sync, then open Android Studio
+```
+
+Run `npm run cap:sync` after every web change before building in Xcode or Android Studio. The `VITE_*` values in `.env.local` are baked in at build time, so use production values for store builds.
+
+### One-time backend setup
+
+1. **Account deletion**: run `supabase/phase9_account_deletion.sql` in the Supabase SQL Editor. The App Store requires in-app account deletion for any app with sign-up; the Profile screen calls this function.
+2. **Password reset in the apps**: in Supabase, go to **Authentication → URL Configuration → Redirect URLs** and add `com.tylerbriggs.neondrift://auth`. Reset emails sent from the apps open the app through that URL scheme. The web build keeps returning to the website.
+
+### Controllers, remotes and TV mode
+
+- Every menu works with a gamepad (D-pad or left stick to move, A to select, B to go back), arrow keys + Enter + Escape, or a TV remote. See `src/menuNav.js`.
+- On Android TV the app detects TV hardware (`TvModePlugin.java`) and switches to TV layout: always-on focus rings, a 5% overscan safe frame, and larger menus.
+- Add `?tv` to the URL to preview TV mode in a desktop browser.
+- Gameplay on TV needs a gamepad; the remote alone can drive the menus.
+- The Android Back button (and TV remote Back) goes back a screen, pauses a live run, or exits from the title screen.
+
+### Testing on Android TV
+
+In Android Studio, create an emulator from **Device Manager → Television**, or install on a real device with `adb install android/app/build/outputs/apk/debug/app-debug.apk`.
+
+### Icons and splash screens
+
+Source images live in `assets/` (`icon-only.png`, `icon-foreground.png`, `icon-background.png`, `splash.png`, `splash-dark.png`). Replace them and run `npm run assets` to regenerate every size. The current icons are upscaled from the 512px PWA icon, so a 1024px original will look sharper. The Android TV banner is `android/app/src/main/res/drawable-xhdpi/banner.png` (320×180).
+
 ## Roadmap Notes (not shipped, for later)
 
 - **Accounts** — Supabase Auth with email magic link. Add when there's demand for cross-device progress sync.
-- **Capacitor app** — wrap for App Store / Play Store. Add after PWA traction warrants the $99/yr Apple Developer fee.
+- **Store listings**: native projects are in place (see Native Apps above). Next up: TestFlight, Play internal testing, then store listings.
 - **Cosmetic unlocks / IAP** — Stripe integration, unlock ship skins. Add after a core audience exists.
 - **Per-upgrade-pick analytics table** — uncomment the `upgrade_picks` table in schema.sql if you want per-decision telemetry rather than per-run.
 - **Run replays** — record input stream, replay for anti-cheat server-side validation. Big effort, only worth it if cheating becomes a real problem.
