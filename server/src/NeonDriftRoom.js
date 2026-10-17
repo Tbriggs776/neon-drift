@@ -8,6 +8,7 @@ const { Schema, MapSchema, type } = require('@colyseus/schema');
 const WORLD_W = 1280;
 const WORLD_H = 720;
 const TICK_HZ = 30;
+const FORK_FAN = 0.9; // Fork Rounds total fan width in radians (about 26° each side)
 
 // ============================================================
 // Schema state (only typed fields are sync'd; plain JS fields
@@ -170,7 +171,7 @@ const UPGRADE_POOL = [
   { id: 'speed',     name: 'PHASE DRIVE',     desc: '+15% move speed' },
   { id: 'magnet',    name: 'CORE MAGNET',     desc: '+60% pickup radius' },
   { id: 'drone',     name: 'ORBITAL DRONE',   desc: '+1 drone · auto-fires' },
-  { id: 'multishot', name: 'FORK ROUNDS',     desc: '+2 projectiles per shot' }
+  { id: 'multishot', name: 'FORK ROUNDS',     desc: '+2 bullets · wide fan, tighter each pick' }
 ];
 
 function pickRandomUpgrades(n) {
@@ -691,15 +692,13 @@ class NeonDriftRoom extends Room {
   }
 
   spawnPlayerProjectile(player, ownerId) {
-    // Main shot
-    this.spawnProjectileAt(player, ownerId, player.angle);
-    // Fork rounds: symmetric fan, ~9° per step, alternating sides
-    const extras = player.extraShots || 0;
-    for (let i = 1; i <= extras; i++) {
-      const side = (i % 2 === 1) ? 1 : -1;
-      const step = Math.ceil(i / 2);
-      const fan = side * step * (Math.PI / 20); // ~9 degrees
-      this.spawnProjectileAt(player, ownerId, player.angle + fan);
+    // Fork rounds spread the main shot plus extras evenly across a fixed fan:
+    // the first pick fires straight / left / right, and each later pick packs
+    // the same fan tighter (3 → 5 → 7 bullets). Matches Multi Shot in solo.
+    const count = 1 + (player.extraShots || 0);
+    for (let i = 0; i < count; i++) {
+      const t = count > 1 ? i / (count - 1) - 0.5 : 0;
+      this.spawnProjectileAt(player, ownerId, player.angle + t * FORK_FAN);
     }
   }
 

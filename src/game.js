@@ -1284,6 +1284,9 @@ function spawnEnemy(type, scale = 1, diffMul = 1) {
 // ============================================================
 // UPGRADE POOL (roguelike drops)
 // ============================================================
+// unique: offered once per run (picking it again would do nothing).
+// requires: only offered after the named upgrade has been picked.
+const MULTISHOT_FAN = 0.9; // total fan width in radians (about 26° each side)
 const UPGRADES = [
   // COMMON
   { id: 'dmg1',    name: 'Hotter Pulse',     rarity: 'common', icon: '⚡', desc: '+20% damage', apply: () => run.weapons.damage *= 1.2 },
@@ -1295,7 +1298,8 @@ const UPGRADES = [
   // RARE
   { id: 'pierce',  name: 'Hardlight Rounds', rarity: 'rare',   icon: '◈', desc: 'Bullets pierce +1 enemy', apply: () => run.weapons.pierce++ },
   { id: 'crit',    name: 'Overcharge Coils', rarity: 'rare',   icon: '✦', desc: '+15% crit chance (2x dmg)', apply: () => run.weapons.crit += 0.15 },
-  { id: 'spread2', name: 'Triple Fan',       rarity: 'rare',   icon: '❋', desc: '+2 projectiles, wider spread', apply: () => { run.weapons.projectileCount += 2; run.weapons.spread += 0.2; } },
+  { id: 'multishot1', name: 'Multi Shot',     rarity: 'rare',   icon: '❋', desc: 'Fire 3 bullets: straight, left and right', unique: true, apply: () => { run.weapons.projectileCount += 2; run.weapons.spread = Math.max(run.weapons.spread, MULTISHOT_FAN); } },
+  { id: 'multishot2', name: 'Multi Shot II',  rarity: 'rare',   icon: '✹', desc: '+2 bullets in the same fan, packed tighter (3 → 5)', unique: true, requires: 'multishot1', apply: () => { run.weapons.projectileCount += 2; } },
   { id: 'velocity',name: 'Coilgun',          rarity: 'rare',   icon: '➤',  desc: '+50% projectile speed & damage', apply: () => { run.weapons.projectileSpeed *= 1.5; run.weapons.damage *= 1.5; } },
   { id: 'graze',   name: 'Grazer',           rarity: 'rare',   icon: '◯', desc: 'Near-miss grazing builds combo faster', apply: () => run.passives.grazeBonus += 2 },
   { id: 'leech',   name: 'Core Siphon',      rarity: 'rare',   icon: '❤', desc: 'Cores heal 1 HP every 5 picked up', apply: () => run.passives.pickupHeal += 1 },
@@ -1306,19 +1310,25 @@ const UPGRADES = [
   { id: 'snake1',  name: 'Snake Turret',      rarity: 'rare',   icon: '🐍', desc: '+1 snake slot (press R/LB to deploy, shoots wiggling snakes)', apply: () => { run.maxSnakeTurrets++; toast('Press R or LB to deploy snake turret'); } },
   { id: 'missile', name: 'Missile Rack',     rarity: 'rare',   icon: '◤', desc: 'Every 4th shot becomes a homing missile', apply: () => run.weapons.missileRack = (run.weapons.missileRack || 0) + 1 },
   // LEGENDARY
-  { id: 'homing',  name: 'Smart Rounds',     rarity: 'legendary', icon: '◉', desc: 'Bullets home toward enemies', apply: () => run.weapons.homing = Math.max(run.weapons.homing, 1) },
-  { id: 'explode', name: 'Payload',          rarity: 'legendary', icon: '✺', desc: 'Bullets explode on impact', apply: () => run.weapons.explosive = 1 },
-  { id: 'shock',   name: 'Deathwave',        rarity: 'legendary', icon: '⬢', desc: 'Kills release damaging shockwaves', apply: () => run.passives.onKillShockwave = 1 },
-  { id: 'slowmo',  name: 'Temporal Shield',  rarity: 'legendary', icon: '◐', desc: 'Taking damage triggers brief slow-mo', apply: () => run.passives.timeSlow = 1 },
-  { id: 'ricochet',name: 'Bouncer',          rarity: 'legendary', icon: '⟲', desc: 'Bullets ricochet up to 2 times', apply: () => run.weapons.ricochet = 2 },
+  { id: 'homing',  name: 'Smart Rounds',     rarity: 'legendary', icon: '◉', desc: 'Bullets home toward enemies', unique: true, apply: () => run.weapons.homing = Math.max(run.weapons.homing, 1) },
+  { id: 'explode', name: 'Payload',          rarity: 'legendary', icon: '✺', desc: 'Bullets explode on impact', unique: true, apply: () => run.weapons.explosive = 1 },
+  { id: 'shock',   name: 'Deathwave',        rarity: 'legendary', icon: '⬢', desc: 'Kills release damaging shockwaves', unique: true, apply: () => run.passives.onKillShockwave = 1 },
+  { id: 'slowmo',  name: 'Temporal Shield',  rarity: 'legendary', icon: '◐', desc: 'Taking damage triggers brief slow-mo', unique: true, apply: () => run.passives.timeSlow = 1 },
+  { id: 'ricochet',name: 'Bouncer',          rarity: 'legendary', icon: '⟲', desc: 'Bullets ricochet up to 2 times', unique: true, apply: () => run.weapons.ricochet = 2 },
   // LEGENDARY NEW: drone swarm and beam
   { id: 'drone2',  name: 'Drone Swarm',      rarity: 'legendary', icon: '✨', desc: 'Adds 2 more drones', apply: () => { spawnDrone(); spawnDrone(); } },
-  { id: 'beam',    name: 'Beam Cannon',      rarity: 'legendary', icon: '━', desc: 'Piercing beam replaces pulse', apply: () => { run.beamMode = true; run.weapons.pierce = Math.max(run.weapons.pierce, 99); } }
+  { id: 'beam',    name: 'Beam Cannon',      rarity: 'legendary', icon: '━', desc: 'Piercing beam replaces pulse', unique: true, apply: () => { run.beamMode = true; run.weapons.pierce = Math.max(run.weapons.pierce, 99); } }
 ];
 
 function applyUpgrade(u) {
   u.apply();
   run.upgrades.push(u.id);
+}
+
+function isUpgradeAvailable(u) {
+  if (u.unique && run.upgrades.includes(u.id)) return false;
+  if (u.requires && !run.upgrades.includes(u.requires)) return false;
+  return true;
 }
 
 function offerUpgrades() {
@@ -1335,9 +1345,9 @@ function offerUpgrades() {
     if (r < legendaryChance) rarity = 'legendary';
     else if (r < legendaryChance + rareChance) rarity = 'rare';
     else rarity = 'common';
-    const pool = UPGRADES.filter(u => u.rarity === rarity && !rolls.find(x => x.id === u.id));
+    const pool = UPGRADES.filter(u => u.rarity === rarity && isUpgradeAvailable(u) && !rolls.find(x => x.id === u.id));
     if (pool.length === 0) {
-      const fallback = UPGRADES.filter(u => !rolls.find(x => x.id === u.id));
+      const fallback = UPGRADES.filter(u => isUpgradeAvailable(u) && !rolls.find(x => x.id === u.id));
       rolls.push(fallback[Math.floor(gameRand() * fallback.length)]);
     } else {
       rolls.push(pool[Math.floor(gameRand() * pool.length)]);
