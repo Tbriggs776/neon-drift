@@ -1235,8 +1235,10 @@ function drawMpSpectateBanner() {
   ctx.shadowBlur = 4;
   ctx.font = '13px "Courier New", monospace';
   ctx.fillStyle = '#ffffff';
+  ctx.fillText('Back in when this wave is cleared', canvas.width / 2, y + 24);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
   ctx.fillText(target ? `Spectating ${target.name || 'pilot'} · Pause to leave` : 'Pause to leave',
-    canvas.width / 2, y + 24);
+    canvas.width / 2, y + 42);
   ctx.restore();
 }
 
@@ -5916,6 +5918,15 @@ document.getElementById('abandonBtn').onclick = () => {
         run.player.iframes = 1.0;
       } else if (msg.sid && mpViews.ships.has(msg.sid)) {
         mpViews.ships.get(msg.sid).iframes = 1.0;
+      }
+    } else if (msg.type === 'revive') {
+      spawnMpParticles({ x: msg.x, y: msg.y, color: '#00f0ff', count: 36, speed: 280, life: 0.8, size: 3 });
+      spawnShockwave(msg.x, msg.y, '#00f0ff');
+      if (msg.sid === getCurrentRoom()?.sessionId) {
+        run.player.iframes = 2;
+        toast("You're back in!");
+      } else {
+        toast(`${msg.name || 'Pilot'} is back in!`);
       }
     } else if (msg.type === 'bossSpawn') {
       playSound('bosswarn');

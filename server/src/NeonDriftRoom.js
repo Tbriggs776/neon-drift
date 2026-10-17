@@ -1073,7 +1073,30 @@ class NeonDriftRoom extends Room {
     this.state.projectiles.set(String(this.nextEntityId++), proj);
   }
 
+  // Downed pilots come back once the wave is cleared, beside a living
+  // teammate, with half their hull (the next wave adds +1 on top).
+  reviveDowned() {
+    const living = [];
+    this.state.players.forEach((p) => { if (!p.dead) living.push(p); });
+    if (living.length === 0) return;
+    this.state.players.forEach((p, sid) => {
+      if (!p.dead) return;
+      const buddy = living[Math.floor(Math.random() * living.length)];
+      const a = Math.random() * Math.PI * 2;
+      p.x = wrap(buddy.x + Math.cos(a) * 70, WORLD_W);
+      p.y = wrap(buddy.y + Math.sin(a) * 70, WORLD_H);
+      p.dead = false;
+      p.hp = Math.max(1, Math.ceil(p.maxHp / 2));
+      p.iframes = 2;
+      p.fireCD = 0;
+      p.dashCD = 0;
+      if (p.shieldMax) { p.shieldUp = true; p.shieldCD = 0; }
+      this.broadcast('fx', { type: 'revive', sid, x: p.x, y: p.y, name: p.name });
+    });
+  }
+
   startUpgradePhase() {
+    this.reviveDowned();
     const alive = [];
     this.state.players.forEach((p, sid) => { if (!p.dead) alive.push([p, sid]); });
     if (alive.length === 0) {
