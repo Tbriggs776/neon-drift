@@ -181,6 +181,9 @@
     transform: translateY(-4px);
     box-shadow: 0 0 25px rgba(0, 240, 255, 0.5);
   }
+  /* Multiplayer cards are buttons so controllers and TV remotes can focus them. */
+  button.upgrade { font: inherit; color: inherit; width: 100%; }
+  button.upgrade:disabled { opacity: 0.45; cursor: default; transform: none; }
   .upgrade.rare { border-color: var(--yellow); box-shadow: inset 0 0 20px rgba(255, 234, 0, 0.1); }
   .upgrade.rare:hover { box-shadow: 0 0 30px rgba(255, 234, 0, 0.7); }
   .upgrade.legendary { border-color: var(--pink); box-shadow: inset 0 0 20px rgba(255, 45, 149, 0.15); }

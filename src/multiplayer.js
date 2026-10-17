@@ -233,8 +233,12 @@ export function getMyScore() {
 export function getRemoteEnemies() {
   if (!currentRoom || !currentRoom.state) return [];
   const out = [];
-  currentRoom.state.enemies.forEach((e) => {
-    out.push({ type: e.type, x: e.x, y: e.y, hp: e.hp, maxHp: e.maxHp, r: e.r });
+  currentRoom.state.enemies.forEach((e, id) => {
+    out.push({
+      id, type: e.type, x: e.x, y: e.y, hp: e.hp, maxHp: e.maxHp, r: e.r,
+      angle: e.angle || 0, phase: e.phase || 0, charge: e.charge || 0,
+      intangible: !!e.intangible
+    });
   });
   return out;
 }
@@ -242,8 +246,11 @@ export function getRemoteEnemies() {
 export function getRemoteProjectiles() {
   if (!currentRoom || !currentRoom.state) return [];
   const out = [];
-  currentRoom.state.projectiles.forEach((p) => {
-    out.push({ x: p.x, y: p.y, r: p.r, ownerType: p.ownerType });
+  currentRoom.state.projectiles.forEach((p, id) => {
+    out.push({
+      id, x: p.x, y: p.y, r: p.r, ownerType: p.ownerType,
+      vx: p.vx || 0, vy: p.vy || 0, color: p.color || '', crit: !!p.crit
+    });
   });
   return out;
 }
@@ -251,8 +258,8 @@ export function getRemoteProjectiles() {
 export function getRemotePickups() {
   if (!currentRoom || !currentRoom.state || !currentRoom.state.pickups) return [];
   const out = [];
-  currentRoom.state.pickups.forEach((p) => {
-    out.push({ x: p.x, y: p.y, r: p.r, value: p.value });
+  currentRoom.state.pickups.forEach((p, id) => {
+    out.push({ id, x: p.x, y: p.y, r: p.r, value: p.value });
   });
   return out;
 }

@@ -65,7 +65,8 @@ import {
   getRoomWaveNum,
   getWorldDims,
   isRunInRoom,
-  getFusion
+  getFusion,
+  getCurrentRoom
 } from './multiplayer.js';
 import { initMenuNav, navGamepadFrame } from './menuNav.js';
 import { initNative } from './native.js';
@@ -353,6 +354,9 @@ function newMpRun(options) {
   const runSeed = options.seed || 0;
   setRandomSeed(runSeed);
   startBGM();
+  mpResetViews();
+  mpInputHistory.clear();
+  mpInputSeq = 0;
   // Minimal `run` shape — the MP renderer is self-contained but a few
   // bits (HUD, pause behavior) read from `run` directly.
   run = {
@@ -364,10 +368,11 @@ function newMpRun(options) {
     cores: 0,
     timeElapsed: 0,
     seed: runSeed,
+    screenShake: 0,
     player: {
-      x: 640, y: 360, angle: 0,
+      x: 640, y: 360, lastX: 640, lastY: 360, angle: 0,
       hp: 3, maxHp: 3, r: 12,
-      iframes: 0, invulnDash: 0, dashCD: 0, dashMax: 1,
+      iframes: 0, invulnDash: 0, dashCD: 0, dashMax: 1, fireFlash: 0,
       bank: 0, enginePulse: 0, trail: []
     },
     enemies: [], projectiles: [], particles: [],
@@ -402,6 +407,24 @@ function mpCanvasToWorld(cx, cy) {
 // without waiting for server projectile spawns.
 let mpLocalFireCD = 0;
 
+// Multiplayer screen wrap, mirroring wrap() in server/src/NeonDriftRoom.js:
+// ships (radius 12) leaving one world edge reappear past the opposite edge.
+function mpWrap(v, size) {
+  if (v < -12) return v + size + 24;
+  if (v > size + 12) return v - size - 24;
+  return v;
+}
+// Shortest signed distance between two coordinates on the wrapped axis.
+function mpWrapDelta(d, size) {
+  const period = size + 24;
+  return d - period * Math.round(d / period);
+}
+
+// Inputs sent to the server, numbered, with where we predicted our ship was
+// at the time. Used to reconcile against the server's acknowledged position.
+let mpInputSeq = 0;
+const mpInputHistory = new Map();
+
 function mpTick(t, dt) {
   const { w: ww, h: wh } = getWorldDims();
   const me = getMyPlayer();
@@ -410,22 +433,41 @@ function mpTick(t, dt) {
   const fusion = getFusion();
   const passenger = fusion.time > 0 && fusion.driver !== fusion.mySession;
 
+  run.player.lastX = run.player.x;
+  run.player.lastY = run.player.y;
+
   // 1. Reconcile our predicted position against the server's authoritative
-  // position. Big drift (>80px) snaps; small drift gently lerps.
+  // position. The server reports the last input it applied (me.ack) and keeps
+  // applying it until the next one arrives, so its position lines up with
+  // where we predicted we'd be when we sent the *next* input. Comparing those
+  // means network delay alone never drags the ship backward. Real
+  // disagreement (a hit, Fusion) is eased out, and big jumps snap.
   if (me) {
     if (me.dead || passenger) {
       run.player.x = me.x;
       run.player.y = me.y;
+      mpInputHistory.clear();
     } else {
-      const dx = me.x - run.player.x;
-      const dy = me.y - run.player.y;
+      const sent = me.ack ? mpInputHistory.get(me.ack + 1) : null;
+      const refX = sent ? sent.x : run.player.x;
+      const refY = sent ? sent.y : run.player.y;
+      // Measure the short way across the wrap seam.
+      const dx = mpWrapDelta(me.x - refX, ww);
+      const dy = mpWrapDelta(me.y - refY, wh);
       const dist = Math.hypot(dx, dy);
-      if (dist > 80) {
+      if (dist > 120) {
         run.player.x = me.x;
         run.player.y = me.y;
-      } else if (dist > 1) {
-        run.player.x += dx * 0.25;
-        run.player.y += dy * 0.25;
+        mpInputHistory.clear();
+      } else if (dist > 2) {
+        const cx = dx * 0.15, cy = dy * 0.15;
+        run.player.x = mpWrap(run.player.x + cx, ww);
+        run.player.y = mpWrap(run.player.y + cy, wh);
+        // Shift newer predictions too, so this error isn't corrected twice.
+        for (const h of mpInputHistory.values()) { h.x += cx; h.y += cy; }
+      }
+      for (const seq of mpInputHistory.keys()) {
+        if (seq <= (me.ack || 0)) mpInputHistory.delete(seq);
       }
     }
     run.player.hp = me.hp;
@@ -440,8 +482,8 @@ function mpTick(t, dt) {
     let mx = input.moveX, my = input.moveY;
     const mag = Math.hypot(mx, my);
     if (mag > 1) { mx /= mag; my /= mag; }
-    run.player.x = Math.max(12, Math.min(ww - 12, run.player.x + mx * speed * dt));
-    run.player.y = Math.max(12, Math.min(wh - 12, run.player.y + my * speed * dt));
+    run.player.x = mpWrap(run.player.x + mx * speed * dt, ww);
+    run.player.y = mpWrap(run.player.y + my * speed * dt, wh);
   }
 
   run.waveNum = getRoomWaveNum() || 1;
@@ -466,6 +508,7 @@ function mpTick(t, dt) {
     const fireRateMul = me?.fireRateMul || 1;
     mpLocalFireCD = fusion.time > 0 ? 0.3 : 0.15 / fireRateMul;
     playSound('shoot');
+    run.player.fireFlash = 0.08;
     spawnMpParticles({
       x: run.player.x + Math.cos(input.aimAngle) * 14,
       y: run.player.y + Math.sin(input.aimAngle) * 14,
@@ -483,8 +526,9 @@ function mpTick(t, dt) {
     const mag = Math.hypot(dx, dy);
     if (mag > 0.15) { dx /= mag; dy /= mag; }
     else { dx = Math.cos(input.aimAngle); dy = Math.sin(input.aimAngle); }
-    run.player.x = Math.max(12, Math.min(ww - 12, run.player.x + dx * 120));
-    run.player.y = Math.max(12, Math.min(wh - 12, run.player.y + dy * 120));
+    run.player.x = mpWrap(run.player.x + dx * 120, ww);
+    run.player.y = mpWrap(run.player.y + dy * 120, wh);
+    run.player.invulnDash = 0.35;
     spawnMpParticles({
       x: run.player.x, y: run.player.y,
       color: '#00f0ff', count: 18, speed: 260, life: 0.35, size: 2
@@ -494,15 +538,28 @@ function mpTick(t, dt) {
     input.dashRequested = false;
   }
 
-  // 6. Tick the local cosmetic particle system.
+  // 6. Cosmetics: our ship's trail/bank/flash, the other ships, enemies and
+  // bullets (eased between server updates), particles and screen shake.
+  const lp = run.player;
+  tickShipCosmetics(lp, dt);
+  if (lp.iframes > 0) lp.iframes -= dt;
+  if (lp.invulnDash > 0) lp.invulnDash -= dt;
+  if (lp.fireFlash > 0) lp.fireFlash -= dt;
+  lp.dashCD = me?.dashCD || 0;
+  mpUpdateViews(dt);
   updateMpParticles(dt);
+  updateParticles(dt);
+  if (run.screenShake > 0) run.screenShake = Math.max(0, run.screenShake - dt * 30);
 
   run.timeElapsed += dt;
 
   // 7. Forward input at ~30Hz (server tick rate).
   if (t - lastMpInputAt > 33) {
     lastMpInputAt = t;
+    const seq = ++mpInputSeq;
+    mpInputHistory.set(seq, { x: run.player.x, y: run.player.y });
     sendInput({
+      seq,
       moveX: input.moveX,
       moveY: input.moveY,
       aimAngle: input.aimAngle,
@@ -557,49 +614,190 @@ function drawMpParticles() {
   ctx.restore();
 }
 
+// ---- MP render views ----
+// The server sends state ~30 times a second, but screens refresh at 60-120Hz.
+// These views are what actually gets drawn: enemies and other pilots ease
+// toward the server's positions, bullets keep flying along their velocity
+// between updates, and each view carries the cosmetic state (trail, bank,
+// animation time) that the single-player drawPlayer/drawEnemy art needs.
+const mpViews = { enemies: new Map(), ships: new Map(), shots: new Map() };
+const MP_SNAP_DIST = 120;
+
+function mpResetViews() {
+  mpViews.enemies.clear();
+  mpViews.ships.clear();
+  mpViews.shots.clear();
+}
+
+function mpNewShip(x, y) {
+  return {
+    x, y, lastX: x, lastY: y, angle: 0, r: 12,
+    iframes: 0, invulnDash: 0, dashCD: 0, dashMax: 1, fireFlash: 0,
+    bank: 0, enginePulse: Math.random() * Math.PI * 2, trail: []
+  };
+}
+
+// Ease a view toward the server position. Ships measure the short way across
+// the wrap seam; enemies (which never wrap) use the plain difference.
+function mpEase(view, tx, ty, k, ww, wh, wraps) {
+  const dx = wraps ? mpWrapDelta(tx - view.x, ww) : tx - view.x;
+  const dy = wraps ? mpWrapDelta(ty - view.y, wh) : ty - view.y;
+  if (Math.hypot(dx, dy) > MP_SNAP_DIST) {
+    view.x = tx;
+    view.y = ty;
+  } else if (wraps) {
+    view.x = mpWrap(view.x + dx * k, ww);
+    view.y = mpWrap(view.y + dy * k, wh);
+  } else {
+    view.x += dx * k;
+    view.y += dy * k;
+  }
+}
+
+function mpLerpAngle(a, b, k) {
+  const d = Math.atan2(Math.sin(b - a), Math.cos(b - a));
+  return a + d * k;
+}
+
+function mpUpdateViews(dt) {
+  const { w: ww, h: wh } = getWorldDims();
+  const k = 1 - Math.exp(-dt * 18);
+  const now = performance.now();
+
+  const seenEnemies = new Set();
+  for (const e of getRemoteEnemies()) {
+    seenEnemies.add(e.id);
+    let v = mpViews.enemies.get(e.id);
+    if (!v) {
+      const def = ENEMY_DEFS[e.type];
+      v = {
+        id: e.id, type: e.type, x: e.x, y: e.y, t: Math.random() * 10,
+        color: def ? def.color : (MP_ENEMY_COLORS[e.type] || '#ff2d95')
+      };
+      mpViews.enemies.set(e.id, v);
+    }
+    mpEase(v, e.x, e.y, k, ww, wh, false);
+    v.t += dt;
+    v.r = e.r;
+    v.hp = e.hp;
+    v.maxHp = e.maxHp;
+    v.angle = e.angle;
+    v.phase = e.phase;
+    v.lancerCharge = e.charge;
+    v.visible = !e.intangible;
+  }
+  for (const id of mpViews.enemies.keys()) {
+    if (!seenEnemies.has(id)) mpViews.enemies.delete(id);
+  }
+
+  // Bullets fly straight (or nearly), so dead-reckon from the last server
+  // position using the synced velocity instead of easing behind it.
+  const seenShots = new Set();
+  for (const s of getRemoteProjectiles()) {
+    seenShots.add(s.id);
+    let v = mpViews.shots.get(s.id);
+    if (!v) {
+      v = { sx: s.x, sy: s.y, at: now };
+      mpViews.shots.set(s.id, v);
+    } else if (s.x !== v.sx || s.y !== v.sy) {
+      v.sx = s.x; v.sy = s.y; v.at = now;
+    }
+    const age = Math.min(0.1, (now - v.at) / 1000);
+    v.x = s.x + s.vx * age;
+    v.y = s.y + s.vy * age;
+    v.vx = s.vx; v.vy = s.vy;
+    v.r = s.r;
+    v.ownerType = s.ownerType;
+    v.color = s.color;
+    v.crit = s.crit;
+  }
+  for (const id of mpViews.shots.keys()) {
+    if (!seenShots.has(id)) mpViews.shots.delete(id);
+  }
+
+  const seenShips = new Set();
+  for (const r of getRemotePlayers()) {
+    seenShips.add(r.sessionId);
+    let v = mpViews.ships.get(r.sessionId);
+    if (!v) {
+      v = mpNewShip(r.x, r.y);
+      v.angle = r.angle || 0;
+      mpViews.ships.set(r.sessionId, v);
+    }
+    v.lastX = v.x; v.lastY = v.y;
+    mpEase(v, r.x, r.y, k, ww, wh, true);
+    v.angle = mpLerpAngle(v.angle, r.angle || 0, k);
+    v.sessionId = r.sessionId;
+    v.name = r.name;
+    v.hp = r.hp;
+    v.maxHp = r.maxHp;
+    v.dead = r.dead;
+    v.droneCount = r.droneCount;
+    tickShipCosmetics(v, dt);
+  }
+  for (const id of mpViews.ships.keys()) {
+    if (!seenShips.has(id)) mpViews.ships.delete(id);
+  }
+}
+
 function mpRender() {
   const cam = mpCamera();
   const { ww, wh, scale, camX, camY } = cam;
 
-  // Background
-  ctx.fillStyle = '#0a0514';
+  // Same translucent clear as single player, which leaves short motion trails.
+  ctx.fillStyle = 'rgba(10, 5, 20, 0.35)';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Camera-follow transform: canvas origin maps to (camX, camY) in world.
   ctx.save();
+  if (run.screenShake > 0) {
+    ctx.translate(
+      (Math.random() - 0.5) * run.screenShake,
+      (Math.random() - 0.5) * run.screenShake
+    );
+  }
+  // Camera-follow transform: canvas origin maps to (camX, camY) in world.
   ctx.translate(-camX * scale, -camY * scale);
   ctx.scale(scale, scale);
 
-  // World boundary
-  ctx.strokeStyle = 'rgba(184, 71, 255, 0.4)';
+  drawGrid(ww, wh);
+  // World edge (ships wrap across it)
+  ctx.strokeStyle = 'rgba(184, 71, 255, 0.3)';
   ctx.lineWidth = 2;
   ctx.strokeRect(0, 0, ww, wh);
 
   // Pickups (drawn under enemies/ships so they don't occlude action)
   for (const pk of getRemotePickups()) drawMpPickup(pk);
-  // Enemies
-  for (const e of getRemoteEnemies()) drawMpEnemy(e);
-  // Projectiles
-  for (const p of getRemoteProjectiles()) drawMpProjectile(p);
-  // Cosmetic particles (over enemies, under ships)
+  // Enemy bullets, enemies, then player bullets on top
+  for (const v of mpViews.shots.values()) {
+    if (v.ownerType === 'enemy') drawMpEnemyShot(v);
+  }
+  for (const v of mpViews.enemies.values()) {
+    if (ENEMY_DEFS[v.type]) drawEnemy(v);
+    else drawMpEnemy(v);
+  }
+  for (const v of mpViews.shots.values()) {
+    if (v.ownerType !== 'player') continue;
+    if (v.r >= 12) drawMpFusionShot(v);
+    else drawPlayerBullet(v);
+  }
+  drawParticles();
   drawMpParticles();
+
   const me = getMyPlayer();
   const fusion = getFusion();
   const fused = fusion.time > 0;
-  const remotes = getRemotePlayers();
+  const remotes = [...mpViews.ships.values()];
   // Remote ships (pilots other than me) + their drones. While fused, living
   // pilots are drawn as cannons on the fused ship instead.
-  let idx = 0;
-  for (const r of remotes) {
-    const color = MP_REMOTE_COLORS[idx % MP_REMOTE_COLORS.length];
-    if (!fused) drawMpRemoteShip(r, color);
-    if (!r.dead) drawMpDrones(r.x, r.y, r.droneCount, color);
-    idx++;
-  }
+  remotes.forEach((v, i) => {
+    const color = MP_REMOTE_COLORS[i % MP_REMOTE_COLORS.length];
+    if (!fused) drawMpRemoteShip(v, color);
+    if (!v.dead) drawMpDrones(v.x, v.y, v.droneCount, color);
+  });
   if (fused) drawMpFusedShip(me, remotes, fusion);
   // Local ship + drones (drawn last so they sit on top)
   if (me && !me.dead) {
-    if (!fused) drawMpLocalShip(me);
+    if (!fused) drawPlayer(run.player);
     drawMpDrones(run.player.x, run.player.y, me.droneCount || 0, '#00f0ff');
     // Local HP pips + dash CD ring under the ship (in addition to the HUD
     // pips, because the HUD is at the top of the screen during intense play).
@@ -619,6 +817,7 @@ function mpRender() {
   }
 }
 
+const MP_BOSS_TYPES = ['warden', 'miniboss', 'obelisk', 'hive', 'sentinel', 'prism'];
 const MP_ENEMY_COLORS = {
   grunt: '#ff2d95',
   drifter: '#00f0ff',
@@ -668,52 +867,33 @@ function drawMpPickup(pk) {
   ctx.restore();
 }
 
-function drawMpProjectile(p) {
+function drawMpEnemyShot(v) {
+  const color = v.color || '#ff4d6d';
   ctx.save();
-  ctx.translate(p.x, p.y);
-  // Fusion rounds (server sends r >= 12): white-hot core in a pink halo.
-  if (p.ownerType === 'player' && p.r >= 12) {
-    ctx.shadowColor = '#ff2d95';
-    ctx.shadowBlur = 30;
-    ctx.fillStyle = 'rgba(255, 45, 149, 0.55)';
-    ctx.beginPath();
-    ctx.arc(0, 0, p.r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 12;
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(0, 0, p.r * 0.55, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-    return;
-  }
-  const color = p.ownerType === 'player' ? '#00f0ff' : '#ff4d6d';
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 10;
   ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 12;
   ctx.beginPath();
-  ctx.arc(0, 0, p.r, 0, Math.PI * 2);
+  ctx.arc(v.x, v.y, v.r, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
 
-function drawMpLocalShip(me) {
+// Fusion rounds (server sends r >= 12): white-hot core in a pink halo.
+function drawMpFusionShot(v) {
   ctx.save();
-  ctx.translate(me.x, me.y);
-  ctx.rotate(me.angle || 0);
+  ctx.translate(v.x, v.y);
   ctx.shadowColor = '#ff2d95';
-  ctx.shadowBlur = 18;
-  ctx.fillStyle = 'rgba(10, 5, 20, 0.7)';
-  ctx.strokeStyle = '#ff2d95';
-  ctx.lineWidth = 2;
+  ctx.shadowBlur = 30;
+  ctx.fillStyle = 'rgba(255, 45, 149, 0.55)';
   ctx.beginPath();
-  ctx.moveTo(14, 0);
-  ctx.lineTo(-10, -10);
-  ctx.lineTo(-6, 0);
-  ctx.lineTo(-10, 10);
-  ctx.closePath();
+  ctx.arc(0, 0, v.r, 0, Math.PI * 2);
   ctx.fill();
-  ctx.stroke();
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(0, 0, v.r * 0.55, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
 }
 
@@ -815,25 +995,9 @@ function drawMpFusionMeter(fusion) {
   ctx.restore();
 }
 
-function drawMpRemoteShip(r, color) {
-  if (r.dead) return;
-  ctx.save();
-  ctx.translate(r.x, r.y);
-  ctx.rotate(r.angle || 0);
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 14;
-  ctx.fillStyle = 'rgba(10, 5, 20, 0.6)';
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(12, 0);
-  ctx.lineTo(-8, -8);
-  ctx.lineTo(-5, 0);
-  ctx.lineTo(-8, 8);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-  ctx.restore();
+function drawMpRemoteShip(v, color) {
+  if (v.dead) return;
+  drawPlayer(v, color);
   // Name label above
   ctx.save();
   ctx.fillStyle = color;
@@ -841,10 +1005,10 @@ function drawMpRemoteShip(r, color) {
   ctx.textAlign = 'center';
   ctx.shadowColor = '#000';
   ctx.shadowBlur = 4;
-  ctx.fillText(r.name || 'pilot', r.x, r.y - 18);
+  ctx.fillText(v.name || 'pilot', v.x, v.y - 20);
   ctx.restore();
   // HP pips below
-  drawMpHpPips(r.x, r.y + 22, r.hp || 0, r.maxHp || 3, color);
+  drawMpHpPips(v.x, v.y + 22, v.hp || 0, v.maxHp || 3, color);
 }
 
 // Small HP pips used for teammate (and local) ship indicators.
@@ -935,12 +1099,17 @@ function showMpUpgradeScreen(choices) {
   const list = document.getElementById('mpUpgradeChoices');
   const waiting = document.getElementById('mpUpgradeWaiting');
   if (!overlay || !list) return;
-  list.innerHTML = choices.map((c) => `
-    <button class="btn secondary" data-mp-upgrade-id="${c.id}" style="text-align: left; padding: 12px 16px;">
-      <div style="font-weight: bold; color: var(--cyan);">${c.name}</div>
-      <div class="dim" style="font-size: 12px; margin-top: 2px;">${c.desc}</div>
-    </button>
-  `).join('');
+  const rarityColor = (r) => r === 'legendary' ? 'var(--pink)' : r === 'rare' ? 'var(--yellow)' : 'var(--cyan)';
+  list.innerHTML = choices.map((c) => {
+    const rarity = c.rarity || 'common';
+    return `
+    <button class="upgrade ${rarity}" data-mp-upgrade-id="${c.id}">
+      <div class="upgrade-rarity" style="color: ${rarityColor(rarity)};">${rarity}</div>
+      <div class="upgrade-icon" style="color: ${rarityColor(rarity)};">${c.icon || '✦'}</div>
+      <div class="upgrade-name">${c.name}</div>
+      <div class="upgrade-desc">${c.desc}</div>
+    </button>`;
+  }).join('');
   if (waiting) waiting.textContent = '';
   overlay.classList.remove('hidden');
 }
@@ -1310,24 +1479,28 @@ function startWave(waveNum) {
   }
   run.spawnTimer = 0;
 
-  // Announce
-  const ann = document.getElementById('waveAnnouncer');
-  document.getElementById('waveAnnounceNum').textContent = waveNum.toString().padStart(2, '0');
-  let label = 'WAVE';
-  if (info.type === 'mega') label = 'MEGA BOSS';
-  else if (info.type === 'mini') label = 'MINI BOSS';
-  const labelEl = document.getElementById('waveAnnouncer').querySelector('.wave-label');
-  if (labelEl) labelEl.textContent = label;
-  document.getElementById('waveAnnounceName').textContent = info.name;
-  ann.classList.remove('show');
-  void ann.offsetWidth;
-  ann.classList.add('show');
-  setTimeout(() => ann.classList.remove('show'), 2000);
+  announceWave(waveNum, info.type, info.name);
 
   // Sector transition toast at each 10-wave mark
   if (waveNum === 1 || (waveNum - 1) % 10 === 0) {
     toast(`Sector: ${info.sector.name}`);
   }
+}
+
+// Big "WAVE 07 · SWARM" banner. kind is 'regular', 'mini' or 'mega'.
+function announceWave(waveNum, kind, name) {
+  const ann = document.getElementById('waveAnnouncer');
+  document.getElementById('waveAnnounceNum').textContent = waveNum.toString().padStart(2, '0');
+  let label = 'WAVE';
+  if (kind === 'mega') label = 'MEGA BOSS';
+  else if (kind === 'mini') label = 'MINI BOSS';
+  const labelEl = ann.querySelector('.wave-label');
+  if (labelEl) labelEl.textContent = label;
+  document.getElementById('waveAnnounceName').textContent = name;
+  ann.classList.remove('show');
+  void ann.offsetWidth;
+  ann.classList.add('show');
+  setTimeout(() => ann.classList.remove('show'), 2000);
 }
 
 // ============================================================
@@ -2222,29 +2395,15 @@ function update(dt) {
   if (run.screenShake > 0) run.screenShake = Math.max(0, run.screenShake - dt * 30);
 }
 
-function updatePlayer(dt) {
-  const p = run.player;
-  p.lastX = p.x; p.lastY = p.y;
-  // Use unified input (populated by readInput before update)
-  let vx = input.moveX;
-  let vy = input.moveY;
-  // Compute target position
-  const targetX = p.x + vx * p.speed * dt;
-  const targetY = p.y + vy * p.speed * dt;
-  // Resolve against obstacles (slides along walls)
-  const resolved = resolveCircleMove(p.x, p.y, targetX, targetY, p.r);
-  p.x = resolved.x;
-  p.y = resolved.y;
-  wrapPlayer(p);
-  p.angle = input.aimAngle;
-
-  // Compute movement speed for trail intensity
+// Bank, engine pulse and engine trail for any ship drawn with drawPlayer().
+// Uses p.lastX/p.lastY (position at the start of the frame) to find motion.
+function tickShipCosmetics(p, dt) {
   const dx = p.x - p.lastX, dy = p.y - p.lastY;
   const moveSpeed = Math.hypot(dx, dy);
 
   // Bank: how much the ship is moving "sideways" relative to its aim direction
   // Cross product of (move dir) x (aim dir) gives signed lateral amount
-  if (moveSpeed > 0.5) {
+  if (moveSpeed > 0.5 && moveSpeed < 100) {
     const mdx = dx / moveSpeed;
     const mdy = dy / moveSpeed;
     const cross = Math.cos(p.angle) * mdy - Math.sin(p.angle) * mdx;
@@ -2261,6 +2420,25 @@ function updatePlayer(dt) {
   p.trail.push({ x: p.x, y: p.y, age: 0 });
   if (p.trail.length > 14) p.trail.shift();
   for (const t of p.trail) t.age += dt;
+}
+
+function updatePlayer(dt) {
+  const p = run.player;
+  p.lastX = p.x; p.lastY = p.y;
+  // Use unified input (populated by readInput before update)
+  let vx = input.moveX;
+  let vy = input.moveY;
+  // Compute target position
+  const targetX = p.x + vx * p.speed * dt;
+  const targetY = p.y + vy * p.speed * dt;
+  // Resolve against obstacles (slides along walls)
+  const resolved = resolveCircleMove(p.x, p.y, targetX, targetY, p.r);
+  p.x = resolved.x;
+  p.y = resolved.y;
+  wrapPlayer(p);
+  p.angle = input.aimAngle;
+
+  tickShipCosmetics(p, dt);
 
   if (p.iframes > 0) p.iframes -= dt;
   if (p.invulnDash > 0) p.invulnDash -= dt;
@@ -3951,35 +4129,7 @@ function render() {
   }
 
   // Player projectiles
-  for (const pr of run.projectiles) {
-    ctx.save();
-    const color = pr.crit ? '#ffea00' : '#ff2d95';
-    const angle = Math.atan2(pr.vy, pr.vx);
-    ctx.translate(pr.x, pr.y);
-    ctx.rotate(angle);
-    // Outer glow capsule
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 18;
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.9;
-    const len = pr.crit ? 14 : 11;
-    const thick = pr.crit ? 4 : 3;
-    // Rounded rect
-    ctx.beginPath();
-    ctx.moveTo(-len / 2, -thick / 2);
-    ctx.lineTo(len / 2 - thick / 2, -thick / 2);
-    ctx.arc(len / 2 - thick / 2, 0, thick / 2, -Math.PI / 2, Math.PI / 2);
-    ctx.lineTo(-len / 2 + thick / 2, thick / 2);
-    ctx.arc(-len / 2 + thick / 2, 0, thick / 2, Math.PI / 2, -Math.PI / 2);
-    ctx.closePath();
-    ctx.fill();
-    // Inner white core
-    ctx.globalAlpha = 1;
-    ctx.shadowBlur = 8;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(-len / 2 + 2, -thick / 4, len - 4, thick / 2);
-    ctx.restore();
-  }
+  for (const pr of run.projectiles) drawPlayerBullet(pr);
 
   // Remote multiplayer pilots (drawn before local player so yours renders on top)
   drawRemotePlayers();
@@ -3996,6 +4146,47 @@ function render() {
   drawPowerupDrops();
 
   // Particles
+  drawParticles();
+
+  ctx.restore();
+
+  // HUD sync (lightweight, every frame)
+  updateHUD();
+}
+
+// Glowing capsule bullet; crits are yellow. Shared by single player and
+// multiplayer (which passes its own projectile views).
+function drawPlayerBullet(pr) {
+  ctx.save();
+  const color = pr.crit ? '#ffea00' : '#ff2d95';
+  const angle = Math.atan2(pr.vy, pr.vx);
+  ctx.translate(pr.x, pr.y);
+  ctx.rotate(angle);
+  // Outer glow capsule
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 18;
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.9;
+  const len = pr.crit ? 14 : 11;
+  const thick = pr.crit ? 4 : 3;
+  // Rounded rect
+  ctx.beginPath();
+  ctx.moveTo(-len / 2, -thick / 2);
+  ctx.lineTo(len / 2 - thick / 2, -thick / 2);
+  ctx.arc(len / 2 - thick / 2, 0, thick / 2, -Math.PI / 2, Math.PI / 2);
+  ctx.lineTo(-len / 2 + thick / 2, thick / 2);
+  ctx.arc(-len / 2 + thick / 2, 0, thick / 2, Math.PI / 2, -Math.PI / 2);
+  ctx.closePath();
+  ctx.fill();
+  // Inner white core
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(-len / 2 + 2, -thick / 4, len - 4, thick / 2);
+  ctx.restore();
+}
+
+function drawParticles() {
   for (const p of run.particles) {
     const alpha = p.life / p.maxLife;
     ctx.save();
@@ -4026,29 +4217,24 @@ function render() {
     }
     ctx.restore();
   }
-
-  ctx.restore();
-
-  // HUD sync (lightweight, every frame)
-  updateHUD();
 }
 
-function drawGrid() {
+function drawGrid(w = W, h = H) {
   ctx.save();
   ctx.strokeStyle = 'rgba(184, 71, 255, 0.12)';
   ctx.lineWidth = 1;
   const spacing = 50;
   const scroll = (run.timeElapsed * 30) % spacing;
-  for (let x = -scroll; x < W; x += spacing) {
+  for (let x = -scroll; x < w; x += spacing) {
     ctx.beginPath();
     ctx.moveTo(x, 0);
-    ctx.lineTo(x, H);
+    ctx.lineTo(x, h);
     ctx.stroke();
   }
-  for (let y = -scroll; y < H; y += spacing) {
+  for (let y = -scroll; y < h; y += spacing) {
     ctx.beginPath();
     ctx.moveTo(0, y);
-    ctx.lineTo(W, y);
+    ctx.lineTo(w, y);
     ctx.stroke();
   }
   ctx.restore();
@@ -4096,8 +4282,9 @@ function drawRemotePlayers() {
   }
 }
 
-function drawPlayer() {
-  const p = run.player;
+// Draws a ship with trail, thruster and banking. Multiplayer passes each
+// pilot's ship object and color; single player draws run.player in pink.
+function drawPlayer(p = run.player, hullColor = '#ff2d95') {
 
   // ─── Engine trail (drawn first, behind ship) ───
   if (p.trail.length > 2) {
@@ -4105,8 +4292,9 @@ function drawPlayer() {
     for (let i = 1; i < p.trail.length; i++) {
       const t = p.trail[i];
       const prev = p.trail[i - 1];
-      // Don't draw the segment where the ship wrapped across the screen.
-      if (Math.abs(t.x - prev.x) > W / 2 || Math.abs(t.y - prev.y) > H / 2) continue;
+      // Skip segments that jump (screen wrap, a dash, a network snap) so the
+      // trail never draws a line across the screen.
+      if (Math.abs(t.x - prev.x) > 60 || Math.abs(t.y - prev.y) > 60) continue;
       const alpha = (i / p.trail.length) * 0.5;
       const width = (i / p.trail.length) * 8;
       ctx.strokeStyle = `rgba(0, 240, 255, ${alpha})`;
@@ -4133,7 +4321,7 @@ function drawPlayer() {
 
   const dashing = p.invulnDash > 0;
   const flash = p.iframes > 0 && !dashing && Math.floor(p.iframes * 20) % 2 === 0;
-  const primary = dashing ? '#00f0ff' : '#ff2d95';
+  const primary = dashing ? '#00f0ff' : hullColor;
   const accent = dashing ? '#ffffff' : '#00f0ff';
 
   // ─── Thruster plume (behind ship) ───
@@ -5449,23 +5637,38 @@ document.getElementById('abandonBtn').onclick = () => {
   onFx((msg) => {
     if (!run?.isMultiplayer || !msg) return;
     if (msg.type === 'enemyDeath') {
-      const big = msg.eType === 'warden' || msg.eType === 'miniboss';
-      const color = MP_ENEMY_COLORS[msg.eType] || '#ff2d95';
+      const big = MP_BOSS_TYPES.includes(msg.eType);
+      const color = ENEMY_DEFS[msg.eType]?.color || MP_ENEMY_COLORS[msg.eType] || '#ff2d95';
+      spawnExplosion(msg.x, msg.y, color, big ? 60 : 20);
       spawnMpParticles({
         x: msg.x, y: msg.y, color,
-        count: big ? 50 : 18,
+        count: big ? 50 : 10,
         speed: big ? 380 : 220,
         life: big ? 0.9 : 0.55,
         size: big ? 3 : 2
       });
+      if (big) run.screenShake = 20;
       playSound('explosion');
     } else if (msg.type === 'playerHit') {
       spawnMpParticles({
         x: msg.x, y: msg.y, color: '#ff4d6d',
-        count: 14, speed: 200, life: 0.5, size: 2
+        count: 20, speed: 260, life: 0.6, size: 3
       });
+      const mine = msg.sid
+        ? msg.sid === getCurrentRoom()?.sessionId
+        : Math.hypot(msg.x - run.player.x, msg.y - run.player.y) < 40;
+      if (mine) {
+        run.screenShake = 14;
+        run.player.iframes = 1.0;
+      }
     } else if (msg.type === 'bossSpawn') {
       playSound('bosswarn');
+    } else if (msg.type === 'waveStart') {
+      announceWave(msg.wave, msg.kind, msg.name);
+    } else if (msg.type === 'burst') {
+      spawnExplosion(msg.x, msg.y, msg.color || '#ff2d95', 30);
+    } else if (msg.type === 'shockwave') {
+      spawnShockwave(msg.x, msg.y, '#00f0ff');
     } else if (msg.type === 'fusionStart') {
       spawnMpParticles({ x: msg.x, y: msg.y, color: '#ff2d95', count: 60, speed: 420, life: 0.9, size: 3 });
       spawnMpParticles({ x: msg.x, y: msg.y, color: '#00f0ff', count: 40, speed: 300, life: 0.8, size: 3 });
