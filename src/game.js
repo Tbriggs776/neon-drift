@@ -64,7 +64,8 @@ import {
   getMyScore,
   getRoomWaveNum,
   getWorldDims,
-  isRunInRoom
+  isRunInRoom,
+  getFusion
 } from './multiplayer.js';
 import { initMenuNav, navGamepadFrame } from './menuNav.js';
 import { initNative } from './native.js';
@@ -404,11 +405,15 @@ let mpLocalFireCD = 0;
 function mpTick(t, dt) {
   const { w: ww, h: wh } = getWorldDims();
   const me = getMyPlayer();
+  // While fused, only the driver steers; everyone else rides along on the
+  // server's position, so skip local movement prediction for passengers.
+  const fusion = getFusion();
+  const passenger = fusion.time > 0 && fusion.driver !== fusion.mySession;
 
   // 1. Reconcile our predicted position against the server's authoritative
   // position. Big drift (>80px) snaps; small drift gently lerps.
   if (me) {
-    if (me.dead) {
+    if (me.dead || passenger) {
       run.player.x = me.x;
       run.player.y = me.y;
     } else {
@@ -429,7 +434,7 @@ function mpTick(t, dt) {
 
   // 2. Predict locally: apply input to our position right now so movement
   // feels responsive. Server reconciliation (above) corrects drift.
-  if (run.player.hp > 0 && !me?.dead) {
+  if (run.player.hp > 0 && !me?.dead && !passenger) {
     const speedMul = me?.speedMul || 1;
     const speed = 240 * speedMul;
     let mx = input.moveX, my = input.moveY;
@@ -459,7 +464,7 @@ function mpTick(t, dt) {
   mpLocalFireCD = Math.max(0, mpLocalFireCD - dt);
   if (input.firing && mpLocalFireCD <= 0 && me && !me.dead && me.hp > 0) {
     const fireRateMul = me?.fireRateMul || 1;
-    mpLocalFireCD = 0.15 / fireRateMul;
+    mpLocalFireCD = fusion.time > 0 ? 0.3 : 0.15 / fireRateMul;
     playSound('shoot');
     spawnMpParticles({
       x: run.player.x + Math.cos(input.aimAngle) * 14,
@@ -469,7 +474,7 @@ function mpTick(t, dt) {
   }
 
   // 5. Dash (Shift / dash button). One-shot: consume input.dashRequested.
-  if (input.dashRequested && me && !me.dead && (me.dashCD || 0) <= 0) {
+  if (input.dashRequested && me && !me.dead && !passenger && (me.dashCD || 0) <= 0) {
     input.dashRequested = false;
     sendDash();
     // Predict locally for instant feel: snap our predicted position forward
@@ -578,17 +583,23 @@ function mpRender() {
   for (const p of getRemoteProjectiles()) drawMpProjectile(p);
   // Cosmetic particles (over enemies, under ships)
   drawMpParticles();
-  // Remote ships (pilots other than me) + their drones
+  const me = getMyPlayer();
+  const fusion = getFusion();
+  const fused = fusion.time > 0;
+  const remotes = getRemotePlayers();
+  // Remote ships (pilots other than me) + their drones. While fused, living
+  // pilots are drawn as cannons on the fused ship instead.
   let idx = 0;
-  for (const r of getRemotePlayers()) {
-    drawMpRemoteShip(r, MP_REMOTE_COLORS[idx % MP_REMOTE_COLORS.length]);
-    if (!r.dead) drawMpDrones(r.x, r.y, r.droneCount, MP_REMOTE_COLORS[idx % MP_REMOTE_COLORS.length]);
+  for (const r of remotes) {
+    const color = MP_REMOTE_COLORS[idx % MP_REMOTE_COLORS.length];
+    if (!fused) drawMpRemoteShip(r, color);
+    if (!r.dead) drawMpDrones(r.x, r.y, r.droneCount, color);
     idx++;
   }
+  if (fused) drawMpFusedShip(me, remotes, fusion);
   // Local ship + drones (drawn last so they sit on top)
-  const me = getMyPlayer();
   if (me && !me.dead) {
-    drawMpLocalShip(me);
+    if (!fused) drawMpLocalShip(me);
     drawMpDrones(run.player.x, run.player.y, me.droneCount || 0, '#00f0ff');
     // Local HP pips + dash CD ring under the ship (in addition to the HUD
     // pips, because the HUD is at the top of the screen during intense play).
@@ -599,6 +610,8 @@ function mpRender() {
   }
 
   ctx.restore();
+
+  drawMpFusionMeter(fusion);
 
   // HUD (canvas pixel coords)
   if (typeof updateHUD === 'function') {
@@ -658,6 +671,22 @@ function drawMpPickup(pk) {
 function drawMpProjectile(p) {
   ctx.save();
   ctx.translate(p.x, p.y);
+  // Fusion rounds (server sends r >= 12): white-hot core in a pink halo.
+  if (p.ownerType === 'player' && p.r >= 12) {
+    ctx.shadowColor = '#ff2d95';
+    ctx.shadowBlur = 30;
+    ctx.fillStyle = 'rgba(255, 45, 149, 0.55)';
+    ctx.beginPath();
+    ctx.arc(0, 0, p.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(0, 0, p.r * 0.55, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
   const color = p.ownerType === 'player' ? '#00f0ff' : '#ff4d6d';
   ctx.shadowColor = color;
   ctx.shadowBlur = 10;
@@ -685,6 +714,104 @@ function drawMpLocalShip(me) {
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
+  ctx.restore();
+}
+
+// Fused ship: one big glowing hull at the driver's position with a cannon
+// for every living pilot, each pointing where that pilot is aiming.
+function drawMpFusedShip(me, remotes, fusion) {
+  const amDriver = fusion.driver === fusion.mySession;
+  let cx, cy;
+  if (me && !me.dead) {
+    cx = run.player.x; cy = run.player.y;
+  } else {
+    const d = remotes.find(r => r.sessionId === fusion.driver) || remotes.find(r => !r.dead);
+    if (!d) return;
+    cx = d.x; cy = d.y;
+  }
+  const cannons = [];
+  if (me && !me.dead) cannons.push({ angle: run.player.angle, color: '#ff2d95' });
+  remotes.forEach((r, i) => {
+    if (!r.dead) cannons.push({ angle: r.angle || 0, color: MP_REMOTE_COLORS[i % MP_REMOTE_COLORS.length] });
+  });
+  const t = performance.now() / 1000;
+  const pulse = 1 + Math.sin(t * 8) * 0.06;
+  ctx.save();
+  ctx.translate(cx, cy);
+  // Cannons
+  for (const c of cannons) {
+    ctx.save();
+    ctx.rotate(c.angle);
+    ctx.shadowColor = c.color;
+    ctx.shadowBlur = 16;
+    ctx.fillStyle = c.color;
+    ctx.fillRect(10, -5, 30, 10);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(36, -3, 6, 6);
+    ctx.restore();
+  }
+  // Hull: spinning hexagon with a hot core
+  ctx.rotate(t * 1.5);
+  ctx.shadowColor = '#ff2d95';
+  ctx.shadowBlur = 30;
+  ctx.fillStyle = 'rgba(26, 11, 46, 0.9)';
+  ctx.strokeStyle = '#ff2d95';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    const r = 26 * pulse;
+    if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowColor = '#00f0ff';
+  ctx.fillStyle = '#00f0ff';
+  ctx.beginPath();
+  ctx.arc(0, 0, 9 * pulse, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  if (amDriver) {
+    ctx.save();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '11px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = '#000';
+    ctx.shadowBlur = 4;
+    ctx.fillText('YOU DRIVE', cx, cy + 44);
+    ctx.restore();
+  }
+}
+
+// Fusion meter, bottom center (canvas pixel coords) so toasts at the top
+// never cover it; the 6% margin keeps it inside TV overscan. Fills from team
+// kills; while fused it drains with the time left.
+function drawMpFusionMeter(fusion) {
+  const fused = fusion.time > 0;
+  const frac = fused ? fusion.time / 10 : fusion.meter;
+  const w = 200, h = 8;
+  const x = canvas.width / 2 - w / 2;
+  const y = canvas.height - Math.max(36, canvas.height * 0.06);
+  const color = fused ? '#ff2d95' : '#00f0ff';
+  ctx.save();
+  ctx.font = 'bold 10px "Courier New", monospace';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = color;
+  ctx.textAlign = 'left';
+  ctx.fillText(fused ? 'FUSED' : 'FUSION', x, y - 3);
+  ctx.textAlign = 'right';
+  ctx.fillText(fused ? `${Math.ceil(fusion.time)}s` : `${Math.floor(fusion.meter * 100)}%`, x + w, y - 3);
+  ctx.fillStyle = 'rgba(10, 5, 20, 0.7)';
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeRect(x, y, w, h);
+  ctx.shadowColor = color;
+  ctx.shadowBlur = fused ? 14 + Math.sin(performance.now() / 80) * 6 : 8;
+  ctx.fillStyle = color;
+  ctx.fillRect(x + 1, y + 1, Math.max(0, (w - 2) * Math.min(1, frac)), h - 2);
   ctx.restore();
 }
 
@@ -5317,6 +5444,14 @@ document.getElementById('abandonBtn').onclick = () => {
       });
     } else if (msg.type === 'bossSpawn') {
       playSound('bosswarn');
+    } else if (msg.type === 'fusionStart') {
+      spawnMpParticles({ x: msg.x, y: msg.y, color: '#ff2d95', count: 60, speed: 420, life: 0.9, size: 3 });
+      spawnMpParticles({ x: msg.x, y: msg.y, color: '#00f0ff', count: 40, speed: 300, life: 0.8, size: 3 });
+      playSound('bosswarn');
+      toast('FUSION! One ship, giant cannons');
+    } else if (msg.type === 'fusionEnd') {
+      spawnMpParticles({ x: msg.x, y: msg.y, color: '#00f0ff', count: 30, speed: 260, life: 0.6, size: 2 });
+      toast('Fusion over · split up');
     }
   });
 
