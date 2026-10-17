@@ -1792,7 +1792,6 @@ const touch = {
 const STICK_RADIUS = 60;
 const STICK_DEADZONE = 6;
 const STICK_FULL_SPEED = 0.65;   // fraction of radius that gives full speed
-const AUTO_AIM_RANGE = 520;
 const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
 
 // Gamepad state
@@ -1806,7 +1805,7 @@ let lastSnakeGamepad = false;
 
 const CONTROLS_HELP = {
   kbm: 'WASD or arrows to move. Mouse to aim, click to fire. Shift to dash through bullets (brief invuln). Every cleared wave offers an upgrade.',
-  touch: 'Drag anywhere on the left to move. Your ship aims and fires automatically; drag on the right to aim yourself. DASH slips through bullets (brief invuln). Every cleared wave offers an upgrade.',
+  touch: 'Drag on the left to move. Drag on the right to aim and fire; hold to keep firing. DASH slips through bullets (brief invuln). Every cleared wave offers an upgrade.',
   gamepad: 'Left stick to move, right stick to aim, RT or A to fire. B to dash through bullets (brief invuln). Every cleared wave offers an upgrade.'
 };
 
@@ -1875,8 +1874,7 @@ function buildControlsPanel(mode) {
     rows.push(['<kbd>START</kbd>', 'Pause', '']);
   } else if (mode === 'touch') {
     rows.push(['<kbd>LEFT</kbd>', 'Move stick', '']);
-    rows.push(['<kbd>AUTO</kbd>', 'Aim + Fire', '']);
-    rows.push(['<kbd>RIGHT</kbd>', 'Drag to aim manually', '']);
+    rows.push(['<kbd>RIGHT</kbd>', 'Aim + Fire stick', '']);
     rows.push(['<kbd>DASH</kbd>', 'Dash button', '']);
     rows.push(['divider', '', '']);
     rows.push(['<kbd>⌖</kbd>', 'Combat Turret', 'turret']);
@@ -1975,6 +1973,13 @@ function handleTouchMove(e) {
       consumed = true;
     } else if (t.identifier === touch.rightId) {
       touch.rightX = t.clientX; touch.rightY = t.clientY;
+      // Same follow-the-thumb rim as the move stick, for quick re-aims.
+      const dx = touch.rightX - touch.rightStartX, dy = touch.rightY - touch.rightStartY;
+      const mag = Math.hypot(dx, dy);
+      if (mag > STICK_RADIUS) {
+        touch.rightStartX = touch.rightX - (dx / mag) * STICK_RADIUS;
+        touch.rightStartY = touch.rightY - (dy / mag) * STICK_RADIUS;
+      }
       updateStickVisual('right', true, touch.rightStartX, touch.rightStartY, t.clientX, t.clientY);
       consumed = true;
     }
@@ -2200,22 +2205,6 @@ function pollGamepad() {
   return true;
 }
 
-// Nearest visible enemy within AUTO_AIM_RANGE of the player, or null.
-// Single-player enemies live in run.enemies; in multiplayer they come from
-// the server state in the same world coordinates as run.player.
-function findAutoAimTarget() {
-  if (!run || !run.active || !run.player) return null;
-  const p = run.player;
-  const enemies = run.isMultiplayer ? getRemoteEnemies() : run.enemies;
-  let best = null, bestD = AUTO_AIM_RANGE;
-  for (const e of enemies) {
-    if (e.intangible || e.hp <= 0) continue;
-    const d = Math.hypot(e.x - p.x, e.y - p.y) - (e.r || 0);
-    if (d < bestD) { bestD = d; best = e; }
-  }
-  return best;
-}
-
 // --- Compute unified input every frame (called from game loop) ---
 function readInput() {
   // Gamepad takes precedence if active
@@ -2239,29 +2228,20 @@ function readInput() {
     } else {
       input.moveX = 0; input.moveY = 0;
     }
-    // Right side: dragging aims manually and fires. Otherwise auto-aim at the
-    // nearest enemy and fire whenever one is in range.
-    let manualAim = false;
+    // Right stick -> aim + fire. Firing lasts as long as the thumb is down;
+    // dragging sets the aim, and holding still keeps the last direction.
     if (touch.rightId !== null) {
       const dx = touch.rightX - touch.rightStartX;
       const dy = touch.rightY - touch.rightStartY;
       if (Math.hypot(dx, dy) > 10) {
         input.aimAngle = Math.atan2(dy, dx);
         input.aimActive = true;
-        input.firing = true;
-        manualAim = true;
       }
+      input.firing = true;
       touch.rightWasActive = true;
     } else {
+      input.firing = false;
       touch.rightWasActive = false;
-    }
-    if (!manualAim) {
-      const target = findAutoAimTarget();
-      if (target) {
-        input.aimAngle = Math.atan2(target.y - run.player.y, target.x - run.player.x);
-        input.aimActive = true;
-      }
-      input.firing = !!target;
     }
     return;
   }
