@@ -1,0 +1,14 @@
+{
+  "appId": "com.tylerbriggs.neondrift",
+  "appName": "Neon Drift",
+  "webDir": "dist",
+  "backgroundColor": "#0a0514",
+  "plugins": {
+    "SystemBars": {
+      "hidden": true,
+      "style": "DARK",
+      "insetsHandling": "native",
+      "initialViewportFitValueHint": "cover"
+    }
+  }
+}

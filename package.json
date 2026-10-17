@@ -6,13 +6,22 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "cap:sync": "vite build && cap sync",
+    "android": "npm run cap:sync && cap open android",
+    "ios": "npm run cap:sync && cap open ios",
+    "assets": "npx @capacitor/assets@3 generate --iconBackgroundColor \"#0a0514\" --iconBackgroundColorDark \"#0a0514\" --splashBackgroundColor \"#0a0514\" --splashBackgroundColorDark \"#0a0514\""
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/ios": "^8.5.3",
     "@supabase/supabase-js": "^2.45.0",
     "colyseus.js": "^0.15.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.3",
     "vite": "^5.4.0"
   }
 }

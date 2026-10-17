@@ -66,6 +66,10 @@
     padding-bottom: calc(20px + env(safe-area-inset-bottom));
   }
   .overlay.hidden { display: none; }
+  /* Everything else toggled with .hidden (HUD, Profile button, MP room view,
+     host-only Start button...). !important beats ID rules like #hud's
+     display:flex and inline display styles. */
+  .hidden { display: none !important; }
 
   .card {
     background: linear-gradient(135deg, rgba(26, 11, 46, 0.95), rgba(10, 5, 20, 0.95));
@@ -556,3 +560,27 @@
   }
   #inputIndicator.gamepad { color: var(--green); }
   #inputIndicator.touch { color: var(--pink); }
+
+  /* Controller / TV remote focus ring (src/menuNav.js). body.nav-active is
+     only set while keys or a gamepad drive the menus, so mouse and touch
+     users never see it. !important beats the inline outline:none on inputs. */
+  body.nav-active .overlay :focus {
+    outline: 2px solid var(--yellow) !important;
+    outline-offset: 3px;
+    box-shadow: 0 0 22px rgba(255, 234, 0, 0.6);
+  }
+  body.nav-active .overlay .btn:focus,
+  body.nav-active .overlay .shop-item:not(.locked):focus { transform: translateY(-2px); }
+  body.nav-active .overlay .upgrade:focus { transform: translateY(-4px); }
+  body.nav-active .overlay [data-nav-scroll]:focus { outline-offset: -2px; }
+
+  /* TV builds (html.tv, set by src/native.js on Android TV). TVs can crop
+     the picture edge (overscan), so keep everything inside a 5% safe frame,
+     and scale menus up for couch distance. */
+  html.tv body { cursor: none; }
+  html.tv .overlay { padding: 5vh 5vw; }
+  html.tv .overlay .card { zoom: 1.15; }
+  html.tv #hud { padding: 4vh 5vw 0; }
+  html.tv #comboMeter { right: 5vw; }
+  html.tv #controlsPanel { left: 5vw; bottom: 5vh; }
+  html.tv #inputIndicator { right: 5vw; bottom: 5vh; }

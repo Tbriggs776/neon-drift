@@ -119,13 +119,13 @@
 </div>
 
 <!-- Sign-in screen (email + password) -->
-<div id="authScreen" class="overlay hidden">
+<div id="authScreen" class="overlay hidden" data-nav-back="closeAuthBtn">
   <div class="card" style="max-width: 480px;">
     <h1 style="font-size: 36px;">SIGN IN</h1>
     <h2>Email and password</h2>
     <p class="dim">New here? Tap Sign Up to create an account. Coming back? Sign In.</p>
     <div style="margin: 14px 0; display: flex; flex-direction: column; gap: 8px;">
-      <input type="email" id="authEmailInput" placeholder="you@example.com" autocomplete="email" inputmode="email" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 10px 12px; font-size: 14px; letter-spacing: 1px; outline: none;">
+      <input type="email" id="authEmailInput" data-nav-default placeholder="you@example.com" autocomplete="email" inputmode="email" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 10px 12px; font-size: 14px; letter-spacing: 1px; outline: none;">
       <input type="password" id="authPasswordInput" placeholder="password (6+ chars)" autocomplete="current-password" minlength="6" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 10px 12px; font-size: 14px; letter-spacing: 1px; outline: none;">
     </div>
     <div id="authMessage" class="dim" style="text-align: center; font-size: 12px; min-height: 18px; margin-bottom: 8px;"></div>
@@ -141,7 +141,7 @@
 </div>
 
 <!-- Profile screen (signed-in users only) -->
-<div id="profileScreen" class="overlay hidden">
+<div id="profileScreen" class="overlay hidden" data-nav-back="closeProfileBtn">
   <div class="card" style="max-width: 520px;">
     <h1 style="font-size: 38px;">PROFILE</h1>
     <h2 id="profileEmailDisplay">&nbsp;</h2>
@@ -161,7 +161,19 @@
     </div>
     <div class="btn-row">
       <button class="btn secondary" id="profileSignOutBtn" style="color: var(--red, #ff4d6d); border-color: var(--red, #ff4d6d);">Sign Out</button>
-      <button class="btn secondary" id="closeProfileBtn">Back</button>
+      <button class="btn secondary" id="closeProfileBtn" data-nav-default>Back</button>
+    </div>
+    <div class="divider"></div>
+    <div style="text-align: center;">
+      <button class="btn secondary" id="profileDeleteBtn" style="padding: 4px 10px; font-size: 11px; color: var(--red, #ff4d6d); border-color: var(--red, #ff4d6d);">Delete Account</button>
+      <div id="profileDeleteConfirm" class="hidden" style="margin-top: 8px;">
+        <p class="dim" style="font-size: 12px;">This permanently deletes your account, friends list and leaderboard scores. It can't be undone.</p>
+        <div id="profileDeleteMsg" class="dim" style="font-size: 11px; min-height: 16px; margin: 4px 0;"></div>
+        <div class="btn-row" style="margin-top: 4px;">
+          <button class="btn secondary" id="profileDeleteConfirmBtn" style="color: var(--red, #ff4d6d); border-color: var(--red, #ff4d6d);">Delete Forever</button>
+          <button class="btn secondary" id="profileDeleteCancelBtn">Cancel</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -173,7 +185,7 @@
     <h2>Set a new password</h2>
     <p class="dim">You followed a password-reset link. Enter a new password below to finish signing in.</p>
     <div style="margin: 14px 0; display: flex; flex-direction: column; gap: 8px;">
-      <input type="password" id="recoveryNewPassword" placeholder="new password (6+ chars)" autocomplete="new-password" minlength="6" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 10px 12px; font-size: 14px; letter-spacing: 1px; outline: none;">
+      <input type="password" id="recoveryNewPassword" data-nav-default placeholder="new password (6+ chars)" autocomplete="new-password" minlength="6" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 10px 12px; font-size: 14px; letter-spacing: 1px; outline: none;">
       <input type="password" id="recoveryConfirmPassword" placeholder="confirm new password" autocomplete="new-password" minlength="6" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--cyan); font-family: inherit; padding: 10px 12px; font-size: 14px; letter-spacing: 1px; outline: none;">
     </div>
     <div id="recoveryMessage" class="dim" style="text-align: center; font-size: 12px; min-height: 18px; margin-bottom: 8px;"></div>
@@ -184,7 +196,7 @@
 </div>
 
 <!-- Leaderboard screen -->
-<div id="leaderboardScreen" class="overlay hidden">
+<div id="leaderboardScreen" class="overlay hidden" data-nav-back="closeLeaderboardBtn">
   <div class="card" style="max-width: 560px;">
     <h1 style="font-size: 40px;">LEADERBOARD</h1>
     <h2>Top pilots across the grid</h2>
@@ -194,7 +206,7 @@
       <button class="btn secondary" id="lbScopeFriends" style="padding: 4px 14px; font-size: 11px;">Friends Only</button>
       <button class="btn secondary" id="lbScopeChallenge" style="padding: 4px 14px; font-size: 11px;">This Week</button>
     </div>
-    <div id="leaderboardList" style="max-height: 420px; overflow-y: auto; font-family: monospace; font-size: 12px;">
+    <div id="leaderboardList" data-nav-scroll style="max-height: 420px; overflow-y: auto; font-family: monospace; font-size: 12px;">
       <div class="dim" style="text-align: center; padding: 40px 0;">Loading...</div>
     </div>
     <div class="btn-row">
@@ -204,7 +216,7 @@
 </div>
 
 <!-- Friends screen -->
-<div id="friendsScreen" class="overlay hidden">
+<div id="friendsScreen" class="overlay hidden" data-nav-back="closeFriendsBtn">
   <div class="card" style="max-width: 560px;">
     <h1 style="font-size: 40px;">FRIENDS</h1>
     <h2>Find pilots, send requests, race their bests</h2>
@@ -232,7 +244,7 @@
 </div>
 
 <!-- Multiplayer lobby screen -->
-<div id="multiplayerScreen" class="overlay hidden">
+<div id="multiplayerScreen" class="overlay hidden" data-nav-back="mpCloseBtn">
   <div class="card" style="max-width: 560px;">
     <h1 style="font-size: 38px;">MULTIPLAYER</h1>
 
@@ -274,7 +286,7 @@
 </div>
 
 <!-- Meta upgrade screen -->
-<div id="metaScreen" class="overlay hidden">
+<div id="metaScreen" class="overlay hidden" data-nav-back="closeMetaBtn">
   <div class="card" style="max-width: 620px;">
     <h1 style="font-size: 42px;">HANGAR</h1>
     <h2>Permanent upgrades · Spend banked cores</h2>
@@ -318,7 +330,7 @@
 </div>
 
 <!-- Death screen -->
-<div id="deathScreen" class="overlay hidden">
+<div id="deathScreen" class="overlay hidden" data-nav-back="deathTitleBtn">
   <div class="card">
     <h1 style="color: var(--red); background: none; -webkit-text-fill-color: var(--red); text-shadow: 0 0 30px var(--red);">DRIFTED</h1>
     <h2 id="deathSubtitle">The grid consumed you</h2>
@@ -360,7 +372,7 @@
 </div>
 
 <!-- Pause screen -->
-<div id="pauseScreen" class="overlay hidden">
+<div id="pauseScreen" class="overlay hidden" data-nav-back="resumeBtn">
   <div class="card">
     <h1 style="font-size: 40px;">PAUSED</h1>
     <div class="btn-row">
@@ -372,8 +384,10 @@
 
 <script type="module" src="/src/game.js"></script>
 <script>
-  // Register service worker for offline PWA support
-  if ('serviceWorker' in navigator) {
+  // Register service worker for offline PWA support. Skipped in the iOS /
+  // Android apps, which bundle every file and must not cache stale builds.
+  var isNativeApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+  if ('serviceWorker' in navigator && !isNativeApp) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('/sw.js').catch((e) => {
         console.warn('SW registration failed:', e);
