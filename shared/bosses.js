@@ -4,21 +4,24 @@
 // Twelve sector bosses that join the original five (Obelisk, Hive,
 // Sentinel, Prism, Warden). Each one guards a sector in sectors.js.
 //
-// The AI functions get the boss `e` and a small game API `g` built in
-// game.js, so this file never reaches into the run directly:
-//   g.W, g.H, g.p (player), g.rand(), g.diff
+// Shared by single player (src/game.js) and the multiplayer server
+// (server/src/NeonDriftRoom.js), so co-op fights the exact same bosses.
+// The AI functions get the boss `e` and a small game API `g`, so this file
+// never reaches into either game directly:
+//   g.W, g.H, g.p (the pilot this boss is after), g.rand(), g.diff
 //   g.top                                      highest y a boss should sit at (below the HUD)
 //   g.shoot(x, y, angle, speed, color, opts)   enemy bullet (see enemyShoot)
-//   g.beam(e, opts)                            telegraphed laser, owned by e
+//   g.beam(e, opts)                            telegraphed laser, owned by e; hits every pilot
 //   g.minion(type, x, y, e)                    spawn an add owned by e
-//   g.hazard(kind, props)                      spawn a sector hazard
+//   g.hazard(kind, props)                      spawn a sector hazard (spaceSim.js)
 //   g.alive(enemy), g.hazards()                lookups
-//   g.pull(x, y, strength, reach, dt)          gravity on the player
-//   g.hurt(), g.explode(x, y, color, size), g.shake(n), g.sound(name)
+//   g.pull(x, y, strength, reach, dt)          gravity on every pilot
+//   g.explode(x, y, color, size), g.shake(n), g.sound(name)
 //
-// Multi-part bosses fill e.parts with { x, y, r } circles. Parts take hits
-// (damage goes to the shared HP pool) and hurt the player on contact.
-// e.shielded makes the boss shrug off all damage (Nexus).
+// Multi-part bosses fill e.parts with { x, y, r } circles (plus `a`, an aim
+// angle, on turrets). Parts take hits (damage goes to the shared HP pool)
+// and hurt pilots on contact. e.shielded makes the boss shrug off all
+// damage (Nexus).
 // ============================================================
 
 export const SPACE_BOSS_DEFS = {
@@ -62,6 +65,45 @@ export const BOSS_TITLES = {
   nexus: 'The Machine Mind',
   singularity: 'The End of Light'
 };
+
+// Multiplayer sends these fields for each boss on top of position and HP,
+// so every screen draws the same art (src/bossArt.js reads them). Values
+// travel as floats; `enc` lists the strings or booleans a field can hold.
+export const BOSS_SYNC = {
+  colossus: ['rot'],
+  glacier: [{ key: 'mode', enc: ['hover', 'aim', 'charge'] }, 'chargeAng', 'vx', 'vy'],
+  helios: ['spin'],
+  arachne: ['vx', 'vy', 'legPhase', 'detFlash'],
+  pulsar: ['beamAng'],
+  binary: ['orbitR'],
+  leviathan: ['heading', 'lunge'],
+  carrier: [],
+  kraken: ['t', 'spin', 'slamArm', 'slamT', 'slamAng'],
+  dreadnought: ['turret'],
+  nexus: [{ key: 'fenceState', enc: ['off', 'warn', 'on'] }, 'shieldHit'],
+  singularity: ['spin'],
+  fighter: [],
+  node: []
+};
+
+export function packBossSync(e) {
+  const spec = BOSS_SYNC[e.ai];
+  if (!spec) return null;
+  return spec.map((f) => {
+    if (typeof f === 'string') return Number(e[f]) || 0;
+    const i = f.enc.indexOf(e[f.key]);
+    return i < 0 ? 0 : i;
+  });
+}
+
+export function unpackBossSync(type, vals, into) {
+  const spec = BOSS_SYNC[type];
+  if (!spec || !vals) return;
+  spec.forEach((f, i) => {
+    if (typeof f === 'string') into[f] = vals[i] ?? 0;
+    else into[f.key] = f.enc[vals[i] | 0];
+  });
+}
 
 const TAU = Math.PI * 2;
 
@@ -417,6 +459,7 @@ function carrier(e, dt, g) {
   hoverTo(e, g.W / 2 + Math.sin(e.t * 0.22) * g.W * 0.3, Math.max(g.H * 0.2, g.top + e.r * 1.7), 0.5, e.baseSpeed * 3);
   const podL = { x: e.x - e.r * 1.15, y: e.y - e.r * 0.15, r: 15 };
   const podR = { x: e.x + e.r * 1.15, y: e.y - e.r * 0.15, r: 15 };
+  for (const pod of [podL, podR]) pod.a = Math.atan2(g.p.y - pod.y, g.p.x - pod.x);
   e.parts = [podL, podR];
   if (!onStage(e, g)) return;
 
@@ -462,6 +505,39 @@ function carrier(e, dt, g) {
 const KRAKEN_ARMS = 6;
 const KRAKEN_JOINTS = 9;
 
+// The six arms as joint chains, from the boss's position, time, spin and
+// slam state (slamArm, slamT, slamAng). Shared so multiplayer clients can
+// redraw the arms from a handful of synced numbers.
+export function krakenArms(e) {
+  const arms = [];
+  for (let i = 0; i < KRAKEN_ARMS; i++) {
+    let base = (e.spin || 0) + (i / KRAKEN_ARMS) * TAU;
+    let ext = 1;
+    const slamming = e.slamArm === i;
+    if (slamming) {
+      // 0.6s wind-up (curl in), then a fast lash toward where the player was
+      const st = e.slamT;
+      if (st < 0.6) ext = 1 - st * 0.4;
+      else {
+        ext = 1 + Math.sin(Math.min(1, (st - 0.6) / 0.7) * Math.PI) * 1.1;
+        if (Number.isFinite(e.slamAng)) {
+          base += Math.atan2(Math.sin(e.slamAng - base), Math.cos(e.slamAng - base)) * Math.min(1, (st - 0.6) * 4);
+        }
+      }
+    }
+    const pts = [];
+    let x = e.x + Math.cos(base) * e.r * 0.8, y = e.y + Math.sin(base) * e.r * 0.8;
+    for (let j = 0; j < KRAKEN_JOINTS; j++) {
+      const ang = base + Math.sin(e.t * 2.2 + j * 0.55 + i * 1.3) * 0.35 * (j / KRAKEN_JOINTS + 0.2);
+      x += Math.cos(ang) * 17 * ext;
+      y += Math.sin(ang) * 17 * ext;
+      pts.push({ x, y });
+    }
+    arms.push({ pts, slam: slamming ? e.slamT : -1 });
+  }
+  return arms;
+}
+
 function kraken(e, dt, g) {
   const hp = e.hp / e.maxHp, enraged = hp < 0.5;
   const d = dist(e, g) || 1;
@@ -473,49 +549,32 @@ function kraken(e, dt, g) {
   e.spin = (e.spin || 0) + dt * (enraged ? 1.4 : 0.25);
 
   // Slam: the arm pointing closest at the player winds up and lashes out
+  if (e.slamArm === undefined) { e.slamArm = -1; e.slamT = 0; e.slamAng = NaN; }
   e.slamCD = (e.slamCD ?? 3) - dt;
-  if (e.slamCD <= 0 && !e.slam) {
+  if (e.slamCD <= 0 && e.slamArm < 0) {
     let best = 0, bestD = Infinity;
     for (let i = 0; i < KRAKEN_ARMS; i++) {
       let dd = (e.spin + (i / KRAKEN_ARMS) * TAU) - a;
       dd = Math.atan2(Math.sin(dd), Math.cos(dd));
       if (Math.abs(dd) < bestD) { bestD = Math.abs(dd); best = i; }
     }
-    e.slam = { arm: best, t: 0 };
+    e.slamArm = best;
+    e.slamT = 0;
+    e.slamAng = NaN;
     e.slamCD = enraged ? 2.4 : 3.4;
   }
-  if (e.slam) {
-    e.slam.t += dt;
-    if (e.slam.t > 1.3) e.slam = null;
+  if (e.slamArm >= 0) {
+    e.slamT += dt;
+    // Lock the lash direction as the wind-up ends
+    if (e.slamT >= 0.6 && !Number.isFinite(e.slamAng)) e.slamAng = a;
+    if (e.slamT > 1.3) e.slamArm = -1;
   }
 
-  e.arms = [];
+  e.arms = krakenArms(e);
   e.parts = [];
-  for (let i = 0; i < KRAKEN_ARMS; i++) {
-    let base = e.spin + (i / KRAKEN_ARMS) * TAU;
-    let ext = 1;
-    if (e.slam && e.slam.arm === i) {
-      // 0.6s wind-up (curl in), then a fast lash toward where the player was
-      const st = e.slam.t;
-      if (st < 0.6) ext = 1 - st * 0.4;
-      else {
-        if (e.slam.ang === undefined) e.slam.ang = a;
-        ext = 1 + Math.sin(Math.min(1, (st - 0.6) / 0.7) * Math.PI) * 1.1;
-        base += Math.atan2(Math.sin(e.slam.ang - base), Math.cos(e.slam.ang - base)) * Math.min(1, (st - 0.6) * 4);
-      }
-    }
-    const pts = [];
-    let x = e.x + Math.cos(base) * e.r * 0.8, y = e.y + Math.sin(base) * e.r * 0.8;
-    let ang = base;
-    for (let j = 0; j < KRAKEN_JOINTS; j++) {
-      ang = base + Math.sin(e.t * 2.2 + j * 0.55 + i * 1.3) * 0.35 * (j / KRAKEN_JOINTS + 0.2);
-      x += Math.cos(ang) * 17 * ext;
-      y += Math.sin(ang) * 17 * ext;
-      pts.push({ x, y });
-    }
-    e.arms.push({ pts, slam: e.slam && e.slam.arm === i ? e.slam.t : -1 });
+  for (const arm of e.arms) {
     for (let j = KRAKEN_JOINTS - 3; j < KRAKEN_JOINTS; j++) {
-      e.parts.push({ x: pts[j].x, y: pts[j].y, r: 9 - (j - (KRAKEN_JOINTS - 3)) * 1.5 });
+      e.parts.push({ x: arm.pts[j].x, y: arm.pts[j].y, r: 9 - (j - (KRAKEN_JOINTS - 3)) * 1.5 });
     }
   }
   if (!onStage(e, g)) return;
@@ -547,14 +606,14 @@ function dreadnought(e, dt, g) {
   hoverTo(e, clamp(g.p.x, g.W * 0.25, g.W * 0.75), Math.max(g.H * 0.17, g.top + e.r * 1.9), 0.35, e.baseSpeed * 2);
   const offs = [[-0.55, -0.35], [0.55, -0.35], [-0.42, 0.3], [0.42, 0.3]];
   e.parts = offs.map(([ox, oy]) => ({ x: e.x + ox * e.r, y: e.y + oy * e.r, r: 12 }));
-  e.turretAng = e.parts.map((pt) => Math.atan2(g.p.y - pt.y, g.p.x - pt.x));
+  for (const pt of e.parts) pt.a = Math.atan2(g.p.y - pt.y, g.p.x - pt.x);
   if (!onStage(e, g)) return;
 
   e.fireCD -= dt;
   if (e.fireCD <= 0) {
     e.turret = ((e.turret || 0) + 1) % 4;
     const pt = e.parts[e.turret];
-    fan(g, pt.x, pt.y, e.turretAng[e.turret], 2, 0.1, 300, '#ff3860');
+    fan(g, pt.x, pt.y, pt.a, 2, 0.1, 300, '#ff3860');
     e.fireCD = e.turret === 3 ? (enraged ? 0.9 : 1.3) : (enraged ? 0.22 : 0.3);
   }
   const noseX = e.x, noseY = e.y + e.r * 1.15;
@@ -610,16 +669,26 @@ function nexus(e, dt, g) {
     n.y = e.y + Math.sin(a) * R;
   });
 
-  // Laser fence between neighbouring nodes: 3s on, 1.6s off, 0.6s flicker warning
+  // Laser fence between neighbouring nodes: 3s on, 1.6s off, 0.6s flicker
+  // warning. Each segment is a beam re-aimed at its two nodes every frame.
   e.fenceT = ((e.fenceT || 0) + dt) % 5.2;
   e.fenceState = e.fenceT < 1.6 ? 'off' : e.fenceT < 2.2 ? 'warn' : 'on';
-  if (e.fenceState === 'on' && e.nodes.length >= 2) {
+  const pairs = [];
+  if (e.fenceState !== 'off' && e.nodes.length >= 2) {
     const n = e.nodes.length;
-    for (let k = 0; k < (n > 2 ? n : 1); k++) {
-      const a1 = e.nodes[k], b1 = e.nodes[(k + 1) % n];
-      if (segDist(g.p.x, g.p.y, a1.x, a1.y, b1.x, b1.y) < 4 + g.p.r) g.hurt();
-    }
+    for (let k = 0; k < (n > 2 ? n : 1); k++) pairs.push([e.nodes[k], e.nodes[(k + 1) % n]]);
   }
+  e.fence = (e.fence || []).filter((b) => !b.done);
+  while (e.fence.length > pairs.length) e.fence.pop().done = true;
+  while (e.fence.length < pairs.length) {
+    e.fence.push(g.beam(e, { warn: Math.max(0, 2.2 - e.fenceT), life: 999, width: 8, len: 1, color: '#00f0ff' }));
+  }
+  pairs.forEach(([a1, b1], k) => {
+    const bm = e.fence[k];
+    bm.x = a1.x; bm.y = a1.y;
+    bm.angle = Math.atan2(b1.y - a1.y, b1.x - a1.x);
+    bm.len = Math.hypot(b1.x - a1.x, b1.y - a1.y);
+  });
   if (!onStage(e, g)) return;
 
   e.fireCD -= dt;
@@ -647,24 +716,23 @@ function spawnNodes(e, g, n) {
   g.explode(e.x, e.y, '#00f0ff', 40);
 }
 
-export function segDist(px, py, x1, y1, x2, y2) {
-  const dx = x2 - x1, dy = y2 - y1;
-  const l2 = dx * dx + dy * dy || 1;
-  const t = clamp(((px - x1) * dx + (py - y1) * dy) / l2, 0, 1);
-  return Math.hypot(px - (x1 + dx * t), py - (y1 + dy * t));
-}
-
 // ------------------------------------------------------------
 // SINGULARITY: a black hole that wants you. Constant pull, debris
 // spiralling in on the accretion disk, jets from the poles, and
 // bursts of Hawking radiation with extra gravity wells when hurt.
 // ------------------------------------------------------------
+// Strength of the Singularity's pull (multiplayer clients predict it too).
+export function singularityPull(e) {
+  return { strength: e.hp / e.maxHp < 0.5 ? 150 : 110, reach: 1100 };
+}
+
 function singularity(e, dt, g) {
   const hp = e.hp / e.maxHp, enraged = hp < 0.5;
   hoverTo(e, g.W / 2 + Math.sin(e.t * 0.2) * g.W * 0.18, g.H * 0.42 + Math.sin(e.t * 0.27) * g.H * 0.12, 0.4, e.baseSpeed * 4);
   e.spin = (e.spin || 0) + dt * 0.8;
   if (!onStage(e, g)) return;
-  g.pull(e.x, e.y, enraged ? 150 : 110, 1100, dt);
+  const pull = singularityPull(e);
+  g.pull(e.x, e.y, pull.strength, pull.reach, dt);
 
   e.fireCD -= dt;
   if (e.fireCD <= 0) {

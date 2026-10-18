@@ -8,6 +8,7 @@
 // ============================================================
 import { rgba, drawBlackHoleArt } from './backdrop.js';
 import { makeRockSprite } from './spaceArt.js';
+import { krakenArms } from '../shared/bosses.js';
 
 const TAU = Math.PI * 2;
 
@@ -546,7 +547,7 @@ function carrier(ctx, e, t, player) {
   ctx.restore();
   // Wing turret pods
   for (const pod of e.parts || []) {
-    const a = aimAngle(pod, player);
+    const a = pod.a ?? aimAngle(pod, player);
     ctx.save();
     ctx.translate(pod.x, pod.y);
     ctx.fillStyle = '#3a3028';
@@ -567,8 +568,8 @@ function kraken(ctx, e, t, player) {
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  // Tentacles behind the body
-  for (const arm of e.arms || []) {
+  // Tentacles behind the body (multiplayer views rebuild them from synced numbers)
+  for (const arm of e.arms || krakenArms(e)) {
     const pts = arm.pts;
     const winding = arm.slam >= 0 && arm.slam < 0.6;
     const n = pts.length;
@@ -705,7 +706,7 @@ function dreadnought(ctx, e, t) {
     ctx.strokeStyle = '#ff3860';
     ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(0, 0, pt.r, 0, TAU); ctx.fill(); ctx.stroke();
-    ctx.rotate((e.turretAng && e.turretAng[k]) || Math.PI / 2);
+    ctx.rotate(pt.a ?? Math.PI / 2);
     ctx.fillStyle = '#8a7a8a';
     ctx.fillRect(2, -4, pt.r * 1.3, 3);
     ctx.fillRect(2, 1, pt.r * 1.3, 3);
@@ -732,33 +733,8 @@ for (let i = 0; i < 12; i++) {
 }
 
 function nexus(ctx, e, t) {
-  // Laser fence between the shield nodes
+  // Tethers from core to nodes (the laser fence between nodes is drawn as beams)
   const nodes = e.nodes || [];
-  if (nodes.length >= 2 && e.fenceState !== 'off') {
-    ctx.save();
-    const on = e.fenceState === 'on';
-    const n = nodes.length;
-    for (let k = 0; k < (n > 2 ? n : 1); k++) {
-      const a = nodes[k], b = nodes[(k + 1) % n];
-      if (on) {
-        ctx.globalCompositeOperation = 'lighter';
-        ctx.strokeStyle = rgba('#00f0ff', 0.35);
-        ctx.lineWidth = 9;
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-      } else {
-        ctx.strokeStyle = rgba('#00f0ff', Math.sin(t * 30) > 0 ? 0.6 : 0.2);
-        ctx.setLineDash([5, 7]);
-        ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-        ctx.setLineDash([]);
-      }
-    }
-    ctx.restore();
-  }
-  // Tethers from core to nodes
   ctx.save();
   ctx.strokeStyle = rgba('#b847ff', 0.25);
   ctx.lineWidth = 1;
