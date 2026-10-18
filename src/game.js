@@ -67,7 +67,11 @@ import {
   isRunInRoom,
   getFusion,
   getCurrentRoom,
-  setLoadout
+  setLoadout,
+  getRemoteHazards,
+  getRemoteBeams,
+  getRemoteCover,
+  getWarp
 } from './multiplayer.js';
 import { initMenuNav, navGamepadFrame } from './menuNav.js';
 import { initNative } from './native.js';
@@ -479,7 +483,12 @@ function newMpRun(options) {
     },
     enemies: [], projectiles: [], particles: [],
     pickups: [], powerupDrops: [], drones: [],
-    turrets: [], medics: [], snakeTurrets: [], snakes: []
+    turrets: [], medics: [], snakeTurrets: [], snakes: [],
+    // Space sectors (views of the server's cover, hazards and beams)
+    sector: sectorForWave(1),
+    obstacles: [], hazards: [], beams: [],
+    fxQueue: [], flash: 0,
+    mpMapId: -1, mpBossName: '', mpWarping: false
   };
   document.getElementById('hud').classList.remove('hidden');
 }
@@ -520,6 +529,28 @@ function mpWrapDelta(d, size) {
   return d - period * Math.round(d / period);
 }
 
+// Predicted ship movement, matching the server's moveShip(): slide along
+// cover, then wrap at the world edge.
+function mpMoveShip(s, x, y, ww, wh) {
+  const res = resolveMove(run.obstacles, s.x, s.y, x, y, 12);
+  const w = wrapPosition(run.obstacles, res.x, res.y, 12, ww, wh);
+  s.x = w.x;
+  s.y = w.y;
+}
+
+// Predicted gravity from wells and the Singularity, as the server applies it.
+function mpApplyPulls(s, dt) {
+  const { w: ww, h: wh } = getWorldDims();
+  for (const h of run.hazards) {
+    if (h.kind === 'well') pullShip(run.obstacles, s, h.x, h.y, h.strength, h.reach, dt);
+  }
+  for (const v of mpViews.enemies.values()) {
+    if (v.type !== 'singularity' || v.x < 20 || v.x > ww - 20 || v.y < 20 || v.y > wh - 20) continue;
+    const pull = singularityPull(v);
+    pullShip(run.obstacles, s, v.x, v.y, pull.strength, pull.reach, dt);
+  }
+}
+
 // Inputs sent to the server, numbered, with where we predicted our ship was
 // at the time. Used to reconcile against the server's acknowledged position.
 let mpInputSeq = 0;
@@ -531,7 +562,16 @@ function mpTick(t, dt) {
   // While fused, only the driver steers; everyone else rides along on the
   // server's position, so skip local movement prediction for passengers.
   const fusion = getFusion();
-  const passenger = fusion.time > 0 && fusion.driver !== fusion.mySession;
+  // Mid-jump the server holds every ship still; ride along like a Fusion
+  // passenger does.
+  const warp = getWarp();
+  const passenger = (fusion.time > 0 && fusion.driver !== fusion.mySession) || warp.time > 0;
+  if (warp.time > 0 && !run.mpWarping) {
+    run.mpWarping = true;
+    showSectorCard(sectorForWave(warp.to || 1), warp.time);
+  } else if (warp.time <= 0) {
+    run.mpWarping = false;
+  }
 
   run.player.lastX = run.player.x;
   run.player.lastY = run.player.y;
@@ -584,8 +624,8 @@ function mpTick(t, dt) {
     let mx = input.moveX, my = input.moveY;
     const mag = Math.hypot(mx, my);
     if (mag > 1) { mx /= mag; my /= mag; }
-    run.player.x = mpWrap(run.player.x + mx * speed * dt, ww);
-    run.player.y = mpWrap(run.player.y + my * speed * dt, wh);
+    mpMoveShip(run.player, run.player.x + mx * speed * dt, run.player.y + my * speed * dt, ww, wh);
+    mpApplyPulls(run.player, dt);
   }
 
   run.waveNum = getRoomWaveNum() || 1;
@@ -628,8 +668,7 @@ function mpTick(t, dt) {
     const mag = Math.hypot(dx, dy);
     if (mag > 0.15) { dx /= mag; dy /= mag; }
     else { dx = Math.cos(input.aimAngle); dy = Math.sin(input.aimAngle); }
-    run.player.x = mpWrap(run.player.x + dx * 120, ww);
-    run.player.y = mpWrap(run.player.y + dy * 120, wh);
+    mpMoveShip(run.player, run.player.x + dx * 120, run.player.y + dy * 120, ww, wh);
     run.player.invulnDash = 0.35;
     spawnMpParticles({
       x: run.player.x, y: run.player.y,
@@ -651,6 +690,7 @@ function mpTick(t, dt) {
   mpUpdateViews(dt);
   updateMpParticles(dt);
   updateParticles(dt);
+  updateFx(dt);
   if (run.screenShake > 0) run.screenShake = Math.max(0, run.screenShake - dt * 30);
 
   run.timeElapsed += dt;
@@ -722,13 +762,14 @@ function drawMpParticles() {
 // toward the server's positions, bullets keep flying along their velocity
 // between updates, and each view carries the cosmetic state (trail, bank,
 // animation time) that the single-player drawPlayer/drawEnemy art needs.
-const mpViews = { enemies: new Map(), ships: new Map(), shots: new Map() };
+const mpViews = { enemies: new Map(), ships: new Map(), shots: new Map(), hazards: new Map() };
 const MP_SNAP_DIST = 120;
 
 function mpResetViews() {
   mpViews.enemies.clear();
   mpViews.ships.clear();
   mpViews.shots.clear();
+  mpViews.hazards.clear();
 }
 
 function mpNewShip(x, y) {
@@ -789,10 +830,77 @@ function mpUpdateViews(dt) {
     v.phase = e.phase;
     v.lancerCharge = e.charge;
     v.visible = !e.intangible;
+    // Sector bosses: art fields, hitboxes (eased like the body), shield, owner
+    unpackBossSync(e.type, e.vals, v);
+    v.shielded = e.shielded;
+    v.owner = e.owner;
+    if (e.parts.length) {
+      if (!v.parts || v.parts.length !== e.parts.length) v.parts = e.parts.map((pt) => ({ ...pt }));
+      else {
+        v.parts.forEach((pv, i) => {
+          const pt = e.parts[i];
+          mpEase(pv, pt.x, pt.y, k, ww, wh, false);
+          pv.r = pt.r;
+          pv.a = pt.a;
+        });
+      }
+    } else {
+      v.parts = null;
+    }
+    if (isBossType(e.type) && run.mpBossName) v.displayName = run.mpBossName;
   }
   for (const id of mpViews.enemies.keys()) {
     if (!seenEnemies.has(id)) mpViews.enemies.delete(id);
   }
+
+  // Boss lasers, attached to their owners for the art (Pulsar emitters,
+  // Dreadnought's charging cannon). Nexus finds its shield nodes the same way.
+  run.beams = getRemoteBeams();
+  for (const v of mpViews.enemies.values()) { v.nodes = null; v.beams = null; v.cannon = null; }
+  for (const v of mpViews.enemies.values()) {
+    const boss = v.owner && mpViews.enemies.get(v.owner);
+    if (boss) (boss.nodes || (boss.nodes = [])).push(v);
+  }
+  for (const b of run.beams) {
+    const boss = b.owner && mpViews.enemies.get(b.owner);
+    if (!boss) continue;
+    (boss.beams || (boss.beams = [])).push(b);
+    if (!boss.cannon) boss.cannon = b;
+  }
+
+  // Cover: rebuilt (with sprites) whenever the server's map changes
+  const cover = getRemoteCover();
+  if (cover.mapId !== run.mpMapId) {
+    run.mpMapId = cover.mapId;
+    const sector = sectorForWave(getWarp().sectorWave || 1);
+    run.obstacles = cover.obstacles.map((o) => ({ ...o, sprite: o.noDraw ? null : coverSprite(o, sector) }));
+  }
+
+  // Hazards: rocks and comets fly on between updates like bullets do
+  const seenHazards = new Set();
+  for (const h of getRemoteHazards()) {
+    seenHazards.add(h.id);
+    let v = mpViews.hazards.get(h.id);
+    if (!v) {
+      v = { at: now, sx: h.x, sy: h.y, rot: Math.random() * Math.PI * 2, spin: (Math.random() - 0.5) * (4 - (h.tier || 2)) * 0.6, hitFlash: 0 };
+      mpViews.hazards.set(h.id, v);
+    } else if (h.x !== v.sx || h.y !== v.sy) {
+      v.sx = h.x; v.sy = h.y; v.at = now;
+    }
+    if (v.hp !== undefined && h.hp < v.hp) v.hitFlash = 0.1;
+    else if (v.hitFlash > 0) v.hitFlash -= dt;
+    Object.assign(v, h);
+    const age = Math.min(0.1, (now - v.at) / 1000);
+    if (h.kind === 'rock' || (h.kind === 'comet' && h.warn <= 0)) {
+      v.x = h.x + h.vx * age;
+      v.y = h.y + h.vy * age;
+    }
+    v.rot += v.spin * dt;
+  }
+  for (const id of mpViews.hazards.keys()) {
+    if (!seenHazards.has(id)) mpViews.hazards.delete(id);
+  }
+  run.hazards = [...mpViews.hazards.values()];
 
   // Bullets fly straight (or nearly), so dead-reckon from the last server
   // position using the synced velocity instead of easing behind it.
@@ -801,14 +909,18 @@ function mpUpdateViews(dt) {
     seenShots.add(s.id);
     let v = mpViews.shots.get(s.id);
     if (!v) {
-      v = { sx: s.x, sy: s.y, at: now };
+      v = { sx: s.x, sy: s.y, at: now, born: now };
       mpViews.shots.set(s.id, v);
     } else if (s.x !== v.sx || s.y !== v.sy) {
       v.sx = s.x; v.sy = s.y; v.at = now;
     }
-    const age = Math.min(0.1, (now - v.at) / 1000);
+    // Shots hanging in place (Glacier's trail) don't fly on yet
+    const age = s.hold > 0 ? 0 : Math.min(0.1, (now - v.at) / 1000);
     v.x = s.x + s.vx * age;
     v.y = s.y + s.vy * age;
+    v.kind = s.kind;
+    v.delay = s.hold;
+    v.age = (now - v.born) / 1000;
     v.vx = s.vx; v.vy = s.vy;
     v.r = s.r;
     v.ownerType = s.ownerType;
@@ -854,11 +966,16 @@ function mpRender() {
   const cam = mpCamera();
   const { ww, wh, scale, camX, camY } = cam;
 
-  // Same space sky as single player, following the room's wave
+  // Same space sky as single player, following the room's sector (it
+  // swaps halfway through a jump)
   const now = performance.now() / 1000;
+  const warp = getWarp();
+  const sector = sectorForWave(warp.sectorWave || getRoomWaveNum() || 1);
+  run.sector = sector;
   const me0 = getMyPlayer();
   const view = me0 ? { px: (run.player.x - camX) * scale - canvas.width / 2, py: (run.player.y - camY) * scale - canvas.height / 2 } : { px: 0, py: 0 };
-  drawSpaceBackdrop(ctx, canvas.width, canvas.height, sectorForWave(getRoomWaveNum() || 1), now, view, 1 / 60);
+  drawSpaceBackdrop(ctx, canvas.width, canvas.height, sector, now, view, 1 / 60);
+  const time = run.timeElapsed;
 
   ctx.save();
   if (run.screenShake > 0) {
@@ -876,11 +993,21 @@ function mpRender() {
   ctx.lineWidth = 2;
   ctx.strokeRect(0, 0, ww, wh);
 
+  // Hazard telegraphs, cover, rocks and mines (same art as single player)
+  drawHazards('under', time, run.hazards, sector, ww, wh);
+  for (const o of run.obstacles) {
+    if (o.noDraw || !o.sprite) continue;
+    if (o.shape === 'circle') drawRock(ctx, { x: o.x, y: o.y, rot: o.rot + time * o.spin, sprite: o.sprite });
+    else drawPanel(ctx, o);
+  }
+  drawHazards('mid', time, run.hazards, sector, ww, wh);
+
   // Pickups (drawn under enemies/ships so they don't occlude action)
   for (const pk of getRemotePickups()) drawMpPickup(pk);
-  // Enemy bullets, enemies, then player bullets on top
+  // Boss lasers, enemy bullets, enemies, then player bullets on top
+  for (const b of run.beams) drawBeam(ctx, b, time);
   for (const v of mpViews.shots.values()) {
-    if (v.ownerType === 'enemy') drawMpEnemyShot(v);
+    if (v.ownerType === 'enemy') drawEnemyBullet(v, time);
   }
   for (const v of mpViews.enemies.values()) {
     if (ENEMY_DEFS[v.type]) drawEnemy(v);
@@ -916,8 +1043,16 @@ function mpRender() {
     drawMpHpPips(run.player.x, run.player.y + 22, me.hp || 0, me.maxHp || 3, myColor);
     if ((me.dashCD || 0) > 0) drawMpDashCooldown(run.player.x, run.player.y, me.dashCD);
   }
+  drawHazards('over', time, run.hazards, sector, ww, wh);
 
   ctx.restore();
+
+  // Hyperspace jump and white flashes
+  if (warp.time > 0) drawWarp(ctx, canvas.width, canvas.height, 1 - warp.time / WARP_TIME, sectorForWave(warp.to || 1).accent);
+  if (run.flash > 0) {
+    ctx.fillStyle = `rgba(255, 255, 255, ${Math.min(0.85, run.flash)})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   // Screen-space overlays
   drawMpOffscreenMarkers(cam, fused);
@@ -979,18 +1114,6 @@ function drawMpPickup(pk) {
   ctx.arc(0, 0, pk.r * pulse, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  ctx.restore();
-}
-
-function drawMpEnemyShot(v) {
-  const color = v.color || '#ff4d6d';
-  ctx.save();
-  ctx.fillStyle = color;
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 12;
-  ctx.beginPath();
-  ctx.arc(v.x, v.y, v.r, 0, Math.PI * 2);
-  ctx.fill();
   ctx.restore();
 }
 
@@ -3592,8 +3715,8 @@ function nukeScreen() {
 // the sim plays in, plus sprites, effects and drawing.
 const rockSpriteCache = new Map();
 
-function rockSprite(sector, kind, tier, variant) {
-  const r = rockRadius(tier, W, H);
+function rockSprite(sector, kind, tier, variant, ww = W, wh = H) {
+  const r = rockRadius(tier, ww, wh);
   const key = `${sector.index}:${kind}:${r}:${variant}`;
   let s = rockSpriteCache.get(key);
   if (!s) {
@@ -3683,16 +3806,17 @@ function spawnRockDebris(x, y, r, rim) {
 }
 
 // Telegraphs and floor-level hazards go under the action, rocks and mines
-// in the middle, comets and lightning on top. `sector` picks rock sprites.
-function drawHazards(layer, time, hazards = run.hazards, sector = run.sector) {
+// in the middle, comets and lightning on top. `sector` picks rock sprites;
+// ww/wh are the arena size (multiplayer draws its fixed world).
+function drawHazards(layer, time, hazards = run.hazards, sector = run.sector, ww = W, wh = H) {
   for (const h of hazards) {
     if (layer === 'under') {
-      if (h.kind === 'flare') drawFlare(ctx, h, W, H, time);
+      if (h.kind === 'flare') drawFlare(ctx, h, ww, wh, time);
       else if (h.kind === 'gate') drawGate(ctx, h, time);
       else if (h.kind === 'pulse') drawPulse(ctx, h, time);
       else if (h.kind === 'well') drawWell(ctx, h, time);
     } else if (layer === 'mid') {
-      if (h.kind === 'rock') drawRock(ctx, { x: h.x, y: h.y, rot: h.rot, hitFlash: h.hitFlash, sprite: rockSprite(sector, h.rockKind, h.tier, h.variant) });
+      if (h.kind === 'rock') drawRock(ctx, { x: h.x, y: h.y, rot: h.rot, hitFlash: h.hitFlash, sprite: rockSprite(sector, h.rockKind, h.tier, h.variant, ww, wh) });
       else if (h.kind === 'mine') drawMine(ctx, h, time);
     } else if (layer === 'over') {
       if (h.kind === 'comet') drawComet(ctx, h, time);
@@ -4365,6 +4489,12 @@ function bossDeath(e) {
     simRemoveHazard(hazardWorld, h);
   }
   run.enemyProjectiles = run.enemyProjectiles.filter((b) => !(b.orbit && b.orbit.center === e));
+  queueBossDeathFx(e);
+}
+
+// The chain of explosions and the white flash when a boss dies (single
+// player and multiplayer). `e` needs x, y, r, color and optional parts.
+function queueBossDeathFx(e) {
   const pts = e.parts && e.parts.length ? e.parts : [{ x: e.x, y: e.y }];
   for (let k = 0; k < 9; k++) {
     const at = pts[k % pts.length];
@@ -5695,7 +5825,7 @@ function updateHUD() {
   }
   const tag = document.getElementById('sectorTag');
   if (tag) {
-    const label = run.sector && !run.isMultiplayer ? sectorLabel(run.sector) : '';
+    const label = run.sector ? sectorLabel(run.sector) : '';
     if (tag.textContent !== label) {
       tag.textContent = label;
       if (run.sector) tag.style.color = run.sector.accent;
@@ -5768,6 +5898,7 @@ function gameOver() {
   hideAll();
   document.getElementById('hud').classList.add('hidden');
   document.getElementById('controlsPanel').classList.add('hidden');
+  document.getElementById('deathSubtitle').textContent = 'Lost to the void';
   document.getElementById('dsWave').textContent = run.waveNum;
   document.getElementById('dsScore').textContent = run.score.toLocaleString();
   document.getElementById('dsCores').textContent = run.cores;
@@ -6232,7 +6363,7 @@ document.getElementById('abandonBtn').onclick = () => {
     stopBGM();
     hideAll();
     document.getElementById('hud').classList.add('hidden');
-    document.getElementById('deathSubtitle').textContent = 'The grid consumed your squad';
+    document.getElementById('deathSubtitle').textContent = 'The whole squad is lost to the void';
     document.getElementById('dsWave').textContent = waveReached || 1;
     document.getElementById('dsScore').textContent = (totalScore || 0).toLocaleString();
     document.getElementById('dsCores').textContent = '—';
@@ -6281,8 +6412,28 @@ document.getElementById('abandonBtn').onclick = () => {
         life: big ? 0.9 : 0.55,
         size: big ? 3 : 2
       });
-      if (big) run.screenShake = 20;
+      if (big) {
+        run.screenShake = 20;
+        const view = [...mpViews.enemies.values()].find((v) => v.type === msg.eType && Math.hypot(v.x - msg.x, v.y - msg.y) < 80);
+        queueBossDeathFx({ x: msg.x, y: msg.y, r: msg.r || 40, color, parts: view && view.parts });
+      }
       playSound('explosion');
+    } else if (msg.type === 'rockBreak') {
+      const kind = msg.rockKind === 'stone' ? 'asteroid' : msg.rockKind;
+      spawnRockDebris(msg.x, msg.y, msg.r, rockColors(run.sector || sectorForWave(1), kind || 'asteroid').rim);
+    } else if (msg.type === 'mineBlast') {
+      spawnExplosion(msg.x, msg.y, '#ff3860', msg.blast * 0.5);
+      spawnShockwave(msg.x, msg.y, '#ffb347');
+      run.screenShake = Math.max(run.screenShake, 9);
+    } else if (msg.type === 'strike') {
+      spawnExplosion(msg.x, msg.y, '#c08bff', 20);
+      run.screenShake = Math.max(run.screenShake, 8);
+    } else if (msg.type === 'wellGone') {
+      spawnShockwave(msg.x, msg.y, '#b847ff');
+    } else if (msg.type === 'shake') {
+      run.screenShake = Math.max(run.screenShake, msg.n || 6);
+    } else if (msg.type === 'sound') {
+      playSound(msg.name);
     } else if (msg.type === 'playerHit') {
       spawnMpParticles({
         x: msg.x, y: msg.y, color: '#ff4d6d',
@@ -6309,12 +6460,19 @@ document.getElementById('abandonBtn').onclick = () => {
     } else if (msg.type === 'bossSpawn') {
       playSound('bosswarn');
     } else if (msg.type === 'waveStart') {
-      announceWave(msg.wave, msg.kind, msg.name);
+      let sub = '';
+      if (msg.kind !== 'regular') {
+        sub = BOSS_TITLES[msg.bossType] || '';
+        run.mpBossName = msg.name;
+      } else if (sectorForWave(msg.wave).waveInSector === 0) {
+        sub = sectorLabel(sectorForWave(msg.wave));
+      }
+      announceWave(msg.wave, msg.kind, msg.name, sub);
     } else if (msg.type === 'shieldBreak') {
       spawnExplosion(msg.x, msg.y, '#7fdcff', 26);
       if (msg.sid === getCurrentRoom()?.sessionId) run.screenShake = 6;
     } else if (msg.type === 'burst') {
-      spawnExplosion(msg.x, msg.y, msg.color || '#ff2d95', 30);
+      spawnExplosion(msg.x, msg.y, msg.color || '#ff2d95', msg.size || 30);
     } else if (msg.type === 'shockwave') {
       spawnShockwave(msg.x, msg.y, '#00f0ff');
     } else if (msg.type === 'fusionStart') {

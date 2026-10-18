@@ -24,13 +24,27 @@ client picks this up from `VITE_COLYSEUS_URL` in the main project's `.env.local`
 
 ## What the server does
 
-- One room type: `neondrift`, up to 4 clients.
+- One room type: `neondrift`, up to 5 pilots.
 - On room create, a 6-char code is generated (alphabet skips 0/O/1/I).
-- Messages handled: `setName`, `setReady`, `start` (host only, all players must be ready).
-- On `start`, the server picks a seed and broadcasts `gameStart { seed }` to everyone, then locks the room.
+- Lobby messages: `setName`, `setLoadout`, `setReady`, `start` (host only, all players must be ready).
+- On `start`, the server picks a seed, broadcasts `gameStart { seed }`, locks the room and runs the authoritative simulation at 30Hz. Clients send `input` and `dash`, and pick upgrades with `pickUpgrade` between waves.
 
-## Phases beyond 8a (not in this server yet)
+### Shared game rules
 
-- 8b: broadcast player positions at 20Hz.
-- 8c: server-authoritative simulation (run the game loop on the server, clients send input only).
-- 8d: reconnection, in-room chat, disconnect handling.
+The 20 sectors, the sector bosses and the cover / hazard simulation live in `/shared` as ES modules, shared with the browser client. The server is CommonJS, so `src/shared.js` loads them with `import()` before the room is defined. Railway builds from the repo root (`railway.toml`), so `/shared` is always there.
+
+What the server syncs for space sectors:
+- `obstacles` (+ `mapId`): the wave's cover. Clients paint sprites from each obstacle's `seed`.
+- `hazards`: rocks, mines, gravity wells, laser gates, comets, flares, lightning and shock pulses.
+- `beams`: telegraphed boss lasers.
+- On each enemy: `vals` (the boss's art fields, see `BOSS_SYNC`), `parts` (multi-part hitboxes), `shielded`, and `owner` for a boss's adds.
+- `warpTime`, `warpTo`, `sectorWave`: the hyperspace jump between sectors.
+
+### Local play-testing
+
+```bash
+cd server
+NEON_DEV=1 npm run dev
+```
+
+`NEON_DEV=1` turns on test messages: `devWave` (jump to a wave), `devGod` (invulnerable pilot), `devPos` (move your pilot) and `devKill` (clear the wave). Never set it in production.

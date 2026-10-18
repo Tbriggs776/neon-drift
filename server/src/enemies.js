@@ -3,10 +3,13 @@
 //
 // Ported from the single-player game (src/game.js: ENEMY_DEFS,
 // getWaveInfo, updateEnemies) so co-op fights the same enemies with the
-// same patterns. Differences: enemies chase the nearest living pilot,
-// there are no obstacles, and waves scale with the number of pilots.
-// Keep the two in step when tuning either one.
+// same patterns. Differences: enemies chase the nearest living pilot and
+// waves scale with the number of pilots. Keep the two in step when tuning
+// either one. The 12 sector bosses and their adds aren't ported: their AI
+// is shared with single player (shared/bosses.js) and added at startup by
+// installSharedDefs().
 // ============================================================
+const { shared } = require('./shared');
 
 const ENEMY_DEFS = {
   grunt:    { hp: 2,  speed: 90,  r: 12, color: '#ff2d95', score: 10,  ai: 'chase' },
@@ -26,17 +29,27 @@ const ENEMY_DEFS = {
   warden:   { hp: 70, speed: 60,  r: 42, color: '#ff3860', score: 750, ai: 'warden',  fireRate: 0.5 }
 };
 
-const MINI_BOSSES = ['obelisk', 'hive', 'sentinel', 'prism'];
-const BOSS_TYPES = ['warden', ...MINI_BOSSES];
+const BOSS_TYPES = ['warden', 'obelisk', 'hive', 'sentinel', 'prism'];
+
+// Adds the sector bosses and their minions (fighters, shield nodes).
+function installSharedDefs(bosses) {
+  Object.assign(ENEMY_DEFS, bosses.SPACE_BOSS_DEFS, bosses.MINION_DEFS);
+  for (const type of Object.keys(bosses.SPACE_BOSS_DEFS)) {
+    if (!BOSS_TYPES.includes(type)) BOSS_TYPES.push(type);
+  }
+}
 
 const WAVE_NAMES = ['SWARM', 'LATTICE', 'FRACTURE', 'CASCADE', 'BREACH', 'TEMPEST', 'RIPTIDE', 'ECLIPSE', 'VORTEX', 'SURGE'];
 
 function isBoss(type) { return BOSS_TYPES.includes(type); }
 
-// Same schedule as single player: a mini-boss every 5 waves, the Warden
-// every 25, enemy types unlocking as waves climb. `pilots` adds enemies and
-// toughness so a full squad still has to work for it.
+// Same schedule as single player: 20 sectors of 5 waves, each ending in
+// that sector's boss, the Warden every 25, enemy types unlocking as waves
+// climb. `pilots` adds enemies and toughness so a full squad still has to
+// work for it.
 function getWaveInfo(waveNum, pilots = 1) {
+  const { sectorForWave, WAVES_PER_SECTOR } = shared().sectors;
+  const sector = sectorForWave(waveNum);
   const diffMul = 1 + (waveNum - 1) * 0.08 + Math.pow(Math.max(0, waveNum - 12), 1.15) * 0.02;
   const extra = Math.max(0, pilots - 1);
   const hpMul = 1 + extra * 0.3;
@@ -47,19 +60,17 @@ function getWaveInfo(waveNum, pilots = 1) {
   if (waveNum % 25 === 0) {
     const tier = loop + 1;
     return {
-      kind: 'mega', waveNum, diffMul, hpMul,
+      kind: 'mega', waveNum, sector, diffMul, hpMul,
       name: tier === 1 ? 'WARDEN' : `WARDEN +${tier - 1}`,
       bossType: 'warden', bossScale: (1 + loop * 0.6) * bossHpMul
     };
   }
-  if (waveNum % 5 === 0) {
-    const mbIdx = Math.floor(waveNum / 5 - 1) % MINI_BOSSES.length;
-    const bossType = MINI_BOSSES[mbIdx];
-    const miniLoop = Math.floor((waveNum / 5 - 1) / MINI_BOSSES.length);
+  if (sector.waveInSector === WAVES_PER_SECTOR - 1) {
+    const bossType = sector.boss;
     return {
-      kind: 'mini', waveNum, diffMul, hpMul,
-      name: bossType.toUpperCase() + (miniLoop > 0 ? ` +${miniLoop}` : ''),
-      bossType, bossScale: (1 + miniLoop * 0.35) * bossHpMul
+      kind: 'mini', waveNum, sector, diffMul, hpMul,
+      name: bossType.toUpperCase() + (sector.loop > 0 ? ` +${sector.loop}` : ''),
+      bossType, bossScale: (1 + loop * 0.35) * bossHpMul
     };
   }
   const types = ['grunt'];
@@ -72,7 +83,7 @@ function getWaveInfo(waveNum, pilots = 1) {
   if (waveNum >= 32) types.push('lancer');
   const baseCount = Math.min(6 + Math.floor(waveNum * 0.9), 34);
   return {
-    kind: 'regular', waveNum, diffMul, hpMul,
+    kind: 'regular', waveNum, sector, diffMul, hpMul,
     name: WAVE_NAMES[(waveNum - 1) % WAVE_NAMES.length],
     enemyCount: Math.min(Math.round(baseCount * (1 + extra * 0.5)), 60),
     types
@@ -111,7 +122,8 @@ function makeEnemy(type, scale, diffMul, worldW, worldH) {
 }
 
 // One AI step. `p` is the target pilot ({x, y}); `fx` provides
-// shoot(x, y, angle, speed, color) and spawnAdds(e) for the hive.
+// shoot(x, y, angle, speed, color), spawnAdds(e) for the hive and
+// move(e, x, y) to slide along cover.
 function updateEnemyAI(e, p, dt, worldW, worldH, fx) {
   e.t += dt;
   const dx = p.x - e.x;
@@ -281,11 +293,13 @@ function updateEnemyAI(e, p, dt, worldW, worldH, fx) {
     }
   }
 
-  e.x += e.vx * dt;
-  e.y += e.vy * dt;
+  fx.move(e, e.x + e.vx * dt, e.y + e.vy * dt);
+  keepInside(e, worldW, worldH);
+}
 
-  // Enemies spawn just outside the world. Once fully inside they stay
-  // inside, so kiting enemies and bosses can't back out of bullet range.
+// Enemies spawn just outside the world. Once fully inside they stay
+// inside, so kiting enemies and bosses can't back out of bullet range.
+function keepInside(e, worldW, worldH) {
   if (!e.entered && e.x > e.r && e.x < worldW - e.r && e.y > e.r && e.y < worldH - e.r) {
     e.entered = true;
   }
@@ -295,4 +309,4 @@ function updateEnemyAI(e, p, dt, worldW, worldH, fx) {
   }
 }
 
-module.exports = { ENEMY_DEFS, BOSS_TYPES, isBoss, getWaveInfo, makeEnemy, updateEnemyAI };
+module.exports = { ENEMY_DEFS, BOSS_TYPES, isBoss, getWaveInfo, makeEnemy, updateEnemyAI, keepInside, installSharedDefs };
