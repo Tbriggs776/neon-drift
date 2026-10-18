@@ -194,6 +194,11 @@ export function sendDash() {
   currentRoom?.send('dash');
 }
 
+// Ask the server to launch this pilot's wingmen (it checks the meter).
+export function sendLaunchWingmen() {
+  currentRoom?.send('wingmen');
+}
+
 // Phase 8b legacy: broadcast local player position. Phase 8c the server
 // owns position, so this is a no-op when authoritative-sim is in play.
 export function sendPlayerState(payload) {
@@ -298,6 +303,17 @@ export function getRemoteCover() {
 export function getWarp() {
   const st = currentRoom?.state;
   return { time: st?.warpTime || 0, to: st?.warpTo || 0, sectorWave: st?.sectorWave || 1, paused: !!st?.paused };
+}
+
+// Every pilot's wingmen, with the owner's ship and color slot for drawing.
+export function getRemoteWingmen() {
+  if (!currentRoom || !currentRoom.state || !currentRoom.state.wingmen) return [];
+  const out = [];
+  currentRoom.state.wingmen.forEach((w, id) => {
+    const owner = currentRoom.state.players.get(w.owner);
+    out.push({ id, x: w.x, y: w.y, angle: w.angle, slot: owner ? owner.slot : 0, ship: owner ? owner.ship : 'glide' });
+  });
+  return out;
 }
 
 export function getRemoteProjectiles() {

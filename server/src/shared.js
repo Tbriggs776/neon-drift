@@ -1,6 +1,6 @@
 // ============================================================
-// Game rules shared with the client (/shared): sectors, boss AI and the
-// cover / hazard simulation. They're ES modules and the server is
+// Game rules shared with the client (/shared): sectors, boss AI, the
+// cover / hazard simulation and wingmen. They're ES modules and the server is
 // CommonJS, so index.js loads them once with import() before the room is
 // defined; shared() hands them out after that.
 // ============================================================
@@ -11,12 +11,13 @@ let mods = null;
 
 async function loadShared() {
   const load = (file) => import(pathToFileURL(path.join(__dirname, '../../shared', file)).href);
-  const [sectors, bosses, sim] = await Promise.all([
+  const [sectors, bosses, sim, wingmen] = await Promise.all([
     load('sectors.js'),
     load('bosses.js'),
-    load('spaceSim.js')
+    load('spaceSim.js'),
+    load('wingmen.js')
   ]);
-  mods = { sectors, bosses, sim };
+  mods = { sectors, bosses, sim, wingmen };
   return mods;
 }
 

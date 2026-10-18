@@ -59,11 +59,13 @@ import {
   sendStart,
   sendPickUpgrade,
   sendDash,
+  sendLaunchWingmen,
   sendPlayerState,
   sendInput,
   getRemotePlayers,
   getRemoteEnemies,
   getRemoteProjectiles,
+  getRemoteWingmen,
   getRemotePickups,
   getRoomTotalScore,
   getMyPlayer,
@@ -82,9 +84,10 @@ import {
 import { initMenuNav, navGamepadFrame } from './menuNav.js';
 import { initNative } from './native.js';
 import { initAppLock } from './appLock.js';
-import { SHIPS, PILOT_COLORS, PILOT_COLOR_NAMES, getShip, drawShipModel, shipGuns } from './ships.js';
+import { SHIPS, PILOT_COLORS, PILOT_COLOR_NAMES, getShip, drawShipModel, shipGuns, SHIP_GAME_SCALE } from './ships.js';
 import { linkProgress, queueProgressPush, flushProgressPush } from './progressSync.js';
 import { SECTORS, WAVES_PER_SECTOR, sectorForWave, loopSuffix } from '../shared/sectors.js';
+import { WING, wingCharge, launchSquad, updateWingman } from '../shared/wingmen.js';
 import { drawSpaceBackdrop, drawWarp, rgba } from './backdrop.js';
 import {
   makeRockSprite, drawRock, makePanelSprite, drawPanel,
@@ -784,7 +787,7 @@ function drawMpParticles() {
 // toward the server's positions, bullets keep flying along their velocity
 // between updates, and each view carries the cosmetic state (trail, bank,
 // animation time) that the single-player drawPlayer/drawEnemy art needs.
-const mpViews = { enemies: new Map(), ships: new Map(), shots: new Map(), hazards: new Map() };
+const mpViews = { enemies: new Map(), ships: new Map(), shots: new Map(), hazards: new Map(), wingmen: new Map() };
 const MP_SNAP_DIST = 120;
 
 function mpResetViews() {
@@ -792,6 +795,7 @@ function mpResetViews() {
   mpViews.ships.clear();
   mpViews.shots.clear();
   mpViews.hazards.clear();
+  mpViews.wingmen.clear();
 }
 
 function mpNewShip(x, y) {
@@ -954,6 +958,21 @@ function mpUpdateViews(dt) {
     if (!seenShots.has(id)) mpViews.shots.delete(id);
   }
 
+  // Wingmen: eased toward the server's positions like ships
+  const seenWing = new Set();
+  for (const r of getRemoteWingmen()) {
+    seenWing.add(r.id);
+    let v = mpViews.wingmen.get(r.id);
+    if (!v) { v = { x: r.x, y: r.y, angle: r.angle }; mpViews.wingmen.set(r.id, v); }
+    mpEase(v, r.x, r.y, k, ww, wh, false);
+    v.angle = mpLerpAngle(v.angle, r.angle, k);
+    v.slot = r.slot;
+    v.ship = r.ship;
+  }
+  for (const id of mpViews.wingmen.keys()) {
+    if (!seenWing.has(id)) mpViews.wingmen.delete(id);
+  }
+
   const seenShips = new Set();
   for (const r of getRemotePlayers()) {
     seenShips.add(r.sessionId);
@@ -1047,6 +1066,7 @@ function mpRender() {
   const fusion = getFusion();
   const fused = fusion.time > 0;
   const remotes = [...mpViews.ships.values()];
+  for (const v of mpViews.wingmen.values()) drawWingmen([v], v.ship, pilotColor(v.slot));
   // Remote ships (pilots other than me) + their drones. While fused, living
   // pilots are drawn as cannons on the fused ship instead.
   for (const v of remotes) {
@@ -1608,6 +1628,7 @@ function newRun(options = {}) {
     fxQueue: [],          // delayed explosions (boss death chains)
     flash: 0,             // white screen flash
     drones: [],           // orbiting drones that shoot alongside you
+    wing: { charge: 0, time: 0, squad: [] },  // wingmen: meter, time left out, the squad (shared/wingmen.js)
     turrets: [],          // stationary combat turrets placed on map
     maxTurrets: 0,        // how many combat turrets you can deploy (upgrade gated)
     turretDeployCD: 0,    // cooldown for deploying next turret
@@ -1791,6 +1812,7 @@ function swapSector() {
   p.x = W / 2; p.y = H / 2;
   p.lastX = p.x; p.lastY = p.y;
   p.trail = [];
+  for (const w of run.wing.squad) { w.x = p.x; w.y = p.y; w.target = null; }
 }
 
 function updateWarp(dt) {
@@ -2178,6 +2200,7 @@ let lastPauseGamepad = false;
 let lastTurretGamepad = false;
 let lastMedicGamepad = false;
 let lastSnakeGamepad = false;
+let lastWingGamepad = false;
 
 const CONTROLS_HELP = {
   kbm: 'WASD or arrows to move. Mouse to aim, click to fire. Shift to dash through bullets (brief invuln). Every cleared wave offers an upgrade.',
@@ -2235,6 +2258,7 @@ function buildControlsPanel(mode) {
     rows.push(['<kbd>Q</kbd>', 'Deploy Combat Turret', 'turret']);
     rows.push(['<kbd>E</kbd>', 'Deploy Medic Turret', 'medic']);
     rows.push(['<kbd>R</kbd>', 'Deploy Snake Turret', 'snake']);
+    rows.push(['<kbd>F</kbd>', 'Launch Wingmen', 'wing']);
     rows.push(['divider', '', '']);
     rows.push(['<kbd>ESC</kbd>', 'Pause', '']);
   } else if (mode === 'gamepad') {
@@ -2246,6 +2270,7 @@ function buildControlsPanel(mode) {
     rows.push(['<kbd>Y</kbd>', 'Deploy Combat Turret', 'turret']);
     rows.push(['<kbd>X</kbd>', 'Deploy Medic Turret', 'medic']);
     rows.push(['<kbd>LT</kbd>', 'Deploy Snake Turret', 'snake']);
+    rows.push(['<kbd>RB</kbd>', 'Launch Wingmen', 'wing']);
     rows.push(['divider', '', '']);
     rows.push(['<kbd>START</kbd>', 'Pause', '']);
   } else if (mode === 'touch') {
@@ -2256,6 +2281,7 @@ function buildControlsPanel(mode) {
     rows.push(['<kbd>⌖</kbd>', 'Combat Turret', 'turret']);
     rows.push(['<kbd>✚</kbd>', 'Medic Turret', 'medic']);
     rows.push(['<kbd>🐍</kbd>', 'Snake Turret', 'snake']);
+    rows.push(['<kbd>✈</kbd>', 'Wingmen (when charged)', 'wing']);
   }
   body.innerHTML = rows.map(([key, label, cls]) => {
     if (key === 'divider') return '<div class="panel-divider"></div>';
@@ -2283,6 +2309,9 @@ window.addEventListener('keydown', (e) => {
   }
   if ((e.key === 'r' || e.key === 'R') && run && run.active && !run.paused) {
     tryDeploySnakeTurret();
+  }
+  if ((e.key === 'f' || e.key === 'F') && run && run.active && !run.paused) {
+    tryLaunchWingmen();
   }
 });
 window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
@@ -2457,6 +2486,17 @@ snakeBtn.addEventListener('click', () => {
   tryDeploySnakeTurret();
 });
 
+// Wingmen button (touch)
+const wingBtn = document.getElementById('wingBtn');
+wingBtn.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  setInputMode('touch');
+  tryLaunchWingmen();
+}, { passive: false });
+wingBtn.addEventListener('click', () => {
+  tryLaunchWingmen();
+});
+
 // Pause button (touch)
 document.getElementById('pauseBtn').addEventListener('click', (e) => {
   e.preventDefault();
@@ -2530,11 +2570,12 @@ function pollGamepad() {
   const xBtn = gp.buttons[2] ? gp.buttons[2].pressed : false; // X (deploy medic)
   const yBtn = gp.buttons[3] ? gp.buttons[3].pressed : false; // Y (deploy turret)
   const lbBtn = gp.buttons[4] ? gp.buttons[4].pressed : false; // LB (dash alt)
+  const rbBtn = gp.buttons[5] ? gp.buttons[5].pressed : false; // RB (launch wingmen)
   const startBtn = gp.buttons[9] ? gp.buttons[9].pressed : false; // Start (pause)
 
   const anyAxisActive = Math.abs(lx) + Math.abs(ly) + Math.abs(rx) + Math.abs(ry) > 0.05;
   const dpadActive = [12, 13, 14, 15].some(i => gp.buttons[i] && gp.buttons[i].pressed);
-  const anyBtnActive = rt > 0.1 || lt > 0.1 || aBtn || bBtn || xBtn || yBtn || lbBtn || startBtn || dpadActive;
+  const anyBtnActive = rt > 0.1 || lt > 0.1 || aBtn || bBtn || xBtn || yBtn || lbBtn || rbBtn || startBtn || dpadActive;
 
   if (anyAxisActive || anyBtnActive) {
     if (input.mode !== 'gamepad') setInputMode('gamepad');
@@ -2578,6 +2619,12 @@ function pollGamepad() {
     tryDeploySnakeTurret();
   }
   lastSnakeGamepad = ltPressed;
+
+  // Edge-triggered wingmen launch (RB)
+  if (rbBtn && !lastWingGamepad && run && run.active && !run.paused) {
+    tryLaunchWingmen();
+  }
+  lastWingGamepad = rbBtn;
 
   if (startBtn && !lastPauseGamepad && run && run.active) {
     togglePause();
@@ -2754,6 +2801,7 @@ function update(dt) {
   updateBeams(dt);
   updateHazards(dt);
   updateDrones(dt);
+  updateWingmen(dt);
   updateTurrets(dt);
   updateMedics(dt);
   updateSnakeTurrets(dt);
@@ -3020,6 +3068,69 @@ function updateDrones(dt) {
         });
       }
     }
+  }
+}
+
+// ============================================================
+// WINGMEN (shared/wingmen.js): a squad that hunts on its own
+// ============================================================
+// Launch with F / RB / the touch button once kills fill the meter. In
+// multiplayer the server flies them; this only asks.
+function tryLaunchWingmen() {
+  if (!run || !run.active || run.paused) return;
+  if (run.isMultiplayer) { sendLaunchWingmen(); return; }
+  const wing = run.wing;
+  if (wing.time > 0 || wing.charge < 1) return;
+  const p = run.player;
+  wing.squad = launchSquad(p.x, p.y, p.angle, Math.random);
+  wing.time = WING.duration;
+  wing.charge = 0;
+  spawnShockwave(p.x, p.y, p.color || '#ff2d95');
+  toast('Wingmen launched');
+}
+
+const wingApi = {
+  get W() { return W; },
+  get H() { return H; },
+  get home() { return run.player; },
+  enemies: () => run.enemies,
+  alive: (e) => !e.dead,
+  shoot: (w, angle) => {
+    run.projectiles.push({
+      x: w.x + Math.cos(angle) * 10, y: w.y + Math.sin(angle) * 10,
+      vx: Math.cos(angle) * WING.shotSpeed, vy: Math.sin(angle) * WING.shotSpeed,
+      damage: run.weapons.damage * WING.damage,
+      crit: false, r: 3, life: 1.2, pierce: 0, hitIds: new Set(),
+      homing: 1, explosive: 0, ricochet: 0, drone: true
+    });
+  }
+};
+
+function updateWingmen(dt) {
+  const wing = run.wing;
+  if (!wing.squad.length) return;
+  // The clock only runs while there's a fight (not during upgrade picks)
+  if (!run.waveCleared) wing.time -= dt;
+  if (wing.time <= 0) {
+    for (const w of wing.squad) spawnExplosion(w.x, w.y, run.player.color || '#ff2d95', 10);
+    wing.squad = [];
+    wing.time = 0;
+    return;
+  }
+  for (const w of wing.squad) updateWingman(w, dt, wingApi);
+}
+
+// Shared by single player and multiplayer: small copies of the pilot's
+// ship. `fade` (0..1) dims them in their last seconds.
+function drawWingmen(squad, shipId, color, fade = 1) {
+  const t = performance.now() / 1000;
+  for (const w of squad) {
+    ctx.save();
+    ctx.translate(w.x, w.y);
+    ctx.rotate(w.angle);
+    drawGlowSprite(0, 0, 22, color, 0.35 * fade);
+    drawShipModel(ctx, shipId || 'glide', color, t, { scale: SHIP_GAME_SCALE * 0.7, alpha: fade });
+    ctx.restore();
   }
 }
 
@@ -4503,6 +4614,8 @@ function killEnemy(idx) {
   // Boss death sound
   const isBossKill = isBossType(e.type);
   if (isBossKill) playSound('explosion');
+  // Kills charge the wingmen meter while the squad is home
+  if (run.wing.time <= 0) run.wing.charge = Math.min(1, run.wing.charge + wingCharge(isBossKill));
   run.enemies.splice(idx, 1);
   if (isBossKill) bossDeath(e);
   if (isBossKill && e.twists && e.twists.includes('volatile')) {
@@ -4853,6 +4966,7 @@ function render() {
 
   // Drones and turrets (after player, so they render in front)
   drawDrones();
+  drawWingmen(run.wing.squad, run.player.ship, run.player.color || '#ff2d95');
   drawTurrets();
   drawMedics();
   drawSnakeTurrets();
@@ -5894,6 +6008,25 @@ function drawEnemy(e) {
 // ============================================================
 // HUD
 // ============================================================
+// Wingmen meter in the HUD and on the touch button. While the squad is out
+// the bar drains with the time left; when full it shows the launch key.
+function updateWingHud(charge, time) {
+  const active = time > 0;
+  const ready = !active && charge >= 1;
+  const meter = document.getElementById('wingMeter');
+  meter.classList.toggle('ready', ready);
+  meter.classList.toggle('active', active);
+  document.getElementById('wingFill').style.width = `${Math.round((active ? time / WING.duration : charge) * 100)}%`;
+  const key = active ? `${Math.ceil(time)}s`
+    : ready ? (input.mode === 'gamepad' ? 'RB' : input.mode === 'touch' ? '✈' : 'F') : '';
+  const keyEl = document.getElementById('wingKey');
+  if (keyEl.textContent !== key) keyEl.textContent = key;
+  const btn = document.getElementById('wingBtn');
+  btn.classList.toggle('ready', ready);
+  btn.classList.toggle('active', active);
+  btn.style.setProperty('--charge', active ? 0 : Math.min(1, charge));
+}
+
 function updateHUD() {
   if (!run) return;
   const pips = document.getElementById('hpPips');
@@ -5908,6 +6041,9 @@ function updateHUD() {
   for (let i = 0; i < pips.children.length; i++) {
     pips.children[i].classList.toggle('empty', i >= run.player.hp);
   }
+  const myMp = run.isMultiplayer ? getMyPlayer() : null;
+  if (myMp) updateWingHud(myMp.wingCharge || 0, myMp.wingTime || 0);
+  else if (run.wing) updateWingHud(run.wing.charge, run.wing.time);
   document.getElementById('waveText').textContent = run.waveNum;
   // Show BOSS badge if currently on a boss wave
   const wt = document.getElementById('waveText');
@@ -6603,6 +6739,10 @@ document.getElementById('abandonBtn').onclick = () => {
       run.screenShake = Math.max(run.screenShake, 8);
     } else if (msg.type === 'wellGone') {
       spawnShockwave(msg.x, msg.y, '#b847ff');
+    } else if (msg.type === 'wingmen') {
+      spawnShockwave(msg.x, msg.y, pilotColor(msg.slot));
+    } else if (msg.type === 'wingmanGone') {
+      spawnMpParticles({ x: msg.x, y: msg.y, color: pilotColor(msg.slot), count: 12, speed: 180, life: 0.4, size: 2 });
     } else if (msg.type === 'shake') {
       run.screenShake = Math.max(run.screenShake, msg.n || 6);
     } else if (msg.type === 'sound') {

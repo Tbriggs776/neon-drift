@@ -242,6 +242,14 @@
     pointer-events: none;
     font-size: 13px;
   }
+  /* Wingmen meter (HULL block): fills from kills, gold when ready, pink while the squad is out */
+  .wing-meter { width: 64px; height: 7px; border: 1px solid rgba(0, 240, 255, 0.6); background: rgba(0, 0, 0, 0.4); }
+  .wing-fill { height: 100%; width: 0; background: var(--cyan); }
+  .wing-meter.ready { border-color: var(--yellow); box-shadow: 0 0 8px rgba(255, 234, 0, 0.6); }
+  .wing-meter.ready .wing-fill { background: var(--yellow); }
+  .wing-meter.active { border-color: var(--pink); }
+  .wing-meter.active .wing-fill { background: var(--pink); }
+  .wing-key { min-width: 18px; font-size: 11px; color: var(--yellow); letter-spacing: 1px; }
   .hud-block {
     background: rgba(10, 5, 20, 0.7);
     border: 1px solid var(--pink);
@@ -619,6 +627,15 @@
   .touch-btn.turret { right: calc(134px + env(safe-area-inset-right)); bottom: calc(34px + env(safe-area-inset-bottom)); border-color: #ffea00; color: #ffea00; box-shadow: 0 0 15px rgba(255,234,0,0.4); }
   .touch-btn.snake { right: calc(112px + env(safe-area-inset-right)); bottom: calc(112px + env(safe-area-inset-bottom)); border-color: #bc8cff; color: #bc8cff; box-shadow: 0 0 15px rgba(188,140,255,0.4); }
   .touch-btn.medic { right: calc(34px + env(safe-area-inset-right)); bottom: calc(134px + env(safe-area-inset-bottom)); border-color: #39ff14; color: #39ff14; box-shadow: 0 0 15px rgba(57,255,20,0.4); }
+  /* Wingmen: the ring fills with the meter (--charge, 0..1) and glows when ready */
+  .touch-btn.wing {
+    width: 62px; height: 62px; font-size: 24px;
+    right: calc(34px + env(safe-area-inset-right)); bottom: calc(214px + env(safe-area-inset-bottom));
+    border-color: rgba(0, 240, 255, 0.35); color: rgba(0, 240, 255, 0.5); box-shadow: none;
+    background: conic-gradient(rgba(0, 240, 255, 0.35) calc(var(--charge, 0) * 360deg), rgba(10, 5, 20, 0.7) 0);
+  }
+  .touch-btn.wing.ready { border-color: var(--yellow); color: var(--yellow); box-shadow: 0 0 18px rgba(255, 234, 0, 0.6); background: rgba(10, 5, 20, 0.7); }
+  .touch-btn.wing.active { border-color: var(--pink); color: var(--pink); box-shadow: 0 0 15px rgba(255, 45, 149, 0.5); background: rgba(10, 5, 20, 0.7); }
   /* Pause sits below the iPhone notch; inset-top pushes it down on devices that report it. */
   .touch-btn.pause { top: calc(70px + env(safe-area-inset-top)); right: calc(20px + env(safe-area-inset-right)); width: 50px; height: 50px; font-size: 18px; border-color: var(--cyan); color: var(--cyan); box-shadow: 0 0 15px rgba(0,240,255,0.3); }
 

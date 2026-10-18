@@ -80,6 +80,10 @@ class Player extends Schema {
     this.extraShots = 0;
     // Dash cooldown synced so the local client can render a cooldown ring.
     this.dashCD = 0;
+    // Wingmen (shared/wingmen.js): meter 0..1 from this pilot's kills, and
+    // seconds the squad has left out. The squad itself is in state.wingmen.
+    this.wingCharge = 0;
+    this.wingTime = 0;
     // Last input sequence number applied, so the client can reconcile its
     // predicted position against the right moment.
     this.ack = 0;
@@ -89,6 +93,7 @@ class Player extends Schema {
     this.damageMul = 1;
     this.magnetMul = 1;
     this.droneFireCD = 0;
+    this.wingSquad = [];  // the flying wingmen (synced copies in state.wingmen)
     this.pickedUpgrade = false;
     this.pendingChoices = null;
     this.r = SHIP_R;    // hit radius for hazards and beams
@@ -153,6 +158,8 @@ type('float32')(Player.prototype, 'fireRateMul');
 type('int8')(Player.prototype, 'droneCount');
 type('int8')(Player.prototype, 'extraShots');
 type('float32')(Player.prototype, 'dashCD');
+type('float32')(Player.prototype, 'wingCharge');
+type('float32')(Player.prototype, 'wingTime');
 type('uint32')(Player.prototype, 'ack');
 
 // One hitbox of a multi-part boss (Leviathan segment, Kraken tip, turret).
@@ -337,6 +344,22 @@ type('float32')(Obstacle.prototype, 'spin');
 type('uint32')(Obstacle.prototype, 'seed');
 type('boolean')(Obstacle.prototype, 'noDraw');
 
+// One of a pilot's wingmen. `owner` is the pilot's sessionId, so every
+// screen can draw it as a small copy of that pilot's ship in their color.
+class Wingman extends Schema {
+  constructor() {
+    super();
+    this.x = 0;
+    this.y = 0;
+    this.angle = 0;
+    this.owner = '';
+  }
+}
+type('float32')(Wingman.prototype, 'x');
+type('float32')(Wingman.prototype, 'y');
+type('float32')(Wingman.prototype, 'angle');
+type('string')(Wingman.prototype, 'owner');
+
 class RoomState extends Schema {
   constructor() {
     super();
@@ -362,6 +385,7 @@ class RoomState extends Schema {
     this.pickups = new MapSchema();
     this.hazards = new MapSchema();
     this.beams = new MapSchema();
+    this.wingmen = new MapSchema();
     this.obstacles = new ArraySchema();
   }
 }
@@ -388,6 +412,7 @@ type('int16')(RoomState.prototype, 'mapId');
 type({ map: Hazard })(RoomState.prototype, 'hazards');
 type({ map: Beam })(RoomState.prototype, 'beams');
 type([Obstacle])(RoomState.prototype, 'obstacles');
+type({ map: Wingman })(RoomState.prototype, 'wingmen');
 
 // ============================================================
 // Helpers
@@ -599,6 +624,17 @@ class NeonDriftRoom extends Room {
       this.broadcast('fx', { type: 'dash', x: p.x, y: p.y });
     });
 
+    this.onMessage('wingmen', (client) => {
+      if (!this.state.started || this.state.gameOver || this.upgradePhase || this.warp) return;
+      const p = this.state.players.get(client.sessionId);
+      if (!p || p.dead || p.wingTime > 0 || p.wingCharge < 1) return;
+      const { wingmen } = shared();
+      p.wingSquad = wingmen.launchSquad(p.x, p.y, p.angle, Math.random);
+      p.wingTime = wingmen.WING.duration;
+      p.wingCharge = 0;
+      this.broadcast('fx', { type: 'wingmen', x: p.x, y: p.y, slot: p.slot });
+    });
+
     this.onMessage('pickUpgrade', (client, payload) => {
       if (!this.upgradePhase) return;
       const p = this.state.players.get(client.sessionId);
@@ -648,6 +684,9 @@ class NeonDriftRoom extends Room {
         pl.droneCount = 0;
         pl.extraShots = 0;
         pl.droneFireCD = 0;
+        pl.wingCharge = 0;
+        pl.wingTime = 0;
+        pl.wingSquad = [];
         pl.pickedUpgrade = false;
         pl.pendingChoices = null;
         resetRunStats(pl);
@@ -667,7 +706,8 @@ class NeonDriftRoom extends Room {
     });
 
     // Test hooks for local play-testing (NEON_DEV=1 only): jump to a wave,
-    // make your pilot invulnerable, move your pilot, clear the wave.
+    // make your pilot invulnerable, move your pilot, fill the wingmen meter,
+    // clear the wave.
     if (DEV) {
       this.onMessage('devWave', (_client, n) => {
         if (!this.state.started) return;
@@ -686,6 +726,10 @@ class NeonDriftRoom extends Room {
       this.onMessage('devPos', (client, pos) => {
         const p = this.state.players.get(client.sessionId);
         if (p) { p.x = Number(pos?.x) || p.x; p.y = Number(pos?.y) || p.y; }
+      });
+      this.onMessage('devWing', (client) => {
+        const p = this.state.players.get(client.sessionId);
+        if (p) p.wingCharge = 1;
       });
       this.onMessage('devKill', () => {
         for (const id of [...this.enemyAI.keys()]) this.killEnemyNow(id, null);
@@ -724,6 +768,7 @@ class NeonDriftRoom extends Room {
     const wasHost = this.state.players.get(client.sessionId)?.isHost || false;
     this.state.players.delete(client.sessionId);
     this.playerInput.delete(client.sessionId);
+    this.syncWingmen();
     if (wasHost && this.state.players.size > 0) {
       const next = this.state.players.values().next().value;
       if (next) next.isHost = true;
@@ -744,6 +789,7 @@ class NeonDriftRoom extends Room {
     this.updateFusion(dt);
     this.updatePlayers(dt);
     this.updateDrones(dt);
+    this.updateWingmen(dt);
     this.updateEnemies(dt);
     this.updateProjectiles(dt);
     this.updateBeams(dt);
@@ -753,6 +799,61 @@ class NeonDriftRoom extends Room {
     this.updateSpawning(dt);
     this.mirrorSpace();
     this.checkGameOver();
+  }
+
+  // Every pilot's squad hunts on its own (shared/wingmen.js), then the
+  // synced copies in state.wingmen are brought in step.
+  updateWingmen(dt) {
+    const { wingmen } = shared();
+    const { WING } = wingmen;
+    // The AI copies carry velocity, so wingmen can lead their shots
+    const enemies = [...this.enemyAI.values()];
+    this.state.players.forEach((p, sid) => {
+      if (!p.wingSquad.length) return;
+      p.wingTime = Math.max(0, p.wingTime - dt);
+      if (p.wingTime <= 0) {
+        for (const w of p.wingSquad) this.broadcast('fx', { type: 'wingmanGone', x: w.x, y: w.y, slot: p.slot });
+        p.wingSquad = [];
+        return;
+      }
+      const g = {
+        W: WORLD_W, H: WORLD_H,
+        home: p,
+        enemies: () => enemies,
+        alive: (e) => !e.dead && this.enemyAI.get(String(e.id)) === e,
+        shoot: (w, angle) => {
+          const proj = new Projectile();
+          proj.x = w.x + Math.cos(angle) * 10; proj.y = w.y + Math.sin(angle) * 10; proj.r = 3;
+          proj.ownerType = 'player';
+          proj.ownerId = sid;
+          proj.owner = p.slot;
+          proj.vx = Math.cos(angle) * WING.shotSpeed;
+          proj.vy = Math.sin(angle) * WING.shotSpeed;
+          proj.life = 1.2;
+          proj.damage = WING.damage * (p.damageMul || 1);
+          proj.homing = true;
+          this.state.projectiles.set(String(this.nextEntityId++), proj);
+        }
+      };
+      for (const w of p.wingSquad) wingmen.updateWingman(w, dt, g);
+    });
+    this.syncWingmen();
+  }
+
+  syncWingmen() {
+    const seen = new Set();
+    this.state.players.forEach((p, sid) => {
+      p.wingSquad.forEach((w, k) => {
+        const id = `${sid}:${k}`;
+        seen.add(id);
+        let s = this.state.wingmen.get(id);
+        if (!s) { s = new Wingman(); s.owner = sid; this.state.wingmen.set(id, s); }
+        s.x = w.x; s.y = w.y; s.angle = w.angle;
+      });
+    });
+    for (const id of [...this.state.wingmen.keys()]) {
+      if (!seen.has(id)) this.state.wingmen.delete(id);
+    }
   }
 
   updateDrones(dt) {
@@ -1247,6 +1348,10 @@ class NeonDriftRoom extends Room {
     if (killer) killer.score += points;
 
     const boss = isBoss(e.type);
+    // The killer's wingmen meter charges while their squad is home
+    if (killer && killer.wingTime <= 0) {
+      killer.wingCharge = Math.min(1, killer.wingCharge + shared().wingmen.wingCharge(boss));
+    }
     const cores =
       e.type === 'warden' ? 30 + Math.floor(Math.random() * 15) :
       boss ? 12 + Math.floor(Math.random() * 8) :
