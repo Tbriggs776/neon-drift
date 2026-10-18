@@ -1,0 +1,13 @@
+#!/bin/sh
+# After every commit: push so the other machine can pull it, then rebuild the
+# web bundle and copy it into the iOS/Android projects so the native app matches.
+# Failures here never undo the commit.
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$branch" != "HEAD" ]; then
+  echo "[post-commit] pushing $branch..."
+  git push -q origin "$branch" 2>&1 || echo "[post-commit] push failed; pull/rebase and push manually"
+fi
+
+echo "[post-commit] syncing native apps (vite build && cap sync)..."
+npm run -s cap:sync || echo "[post-commit] cap sync failed; run 'npm run cap:sync' to retry"

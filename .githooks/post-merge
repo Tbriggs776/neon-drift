@@ -1,0 +1,10 @@
+#!/bin/sh
+# After a pull: reinstall if dependencies changed, then refresh the native apps.
+
+if git diff --name-only ORIG_HEAD HEAD 2>/dev/null | grep -q '^package-lock.json$'; then
+  echo "[post-merge] package-lock.json changed, running npm install..."
+  npm install --no-audit --no-fund || exit 0
+fi
+
+echo "[post-merge] syncing native apps (vite build && cap sync)..."
+npm run -s cap:sync || echo "[post-merge] cap sync failed; run 'npm run cap:sync' to retry"

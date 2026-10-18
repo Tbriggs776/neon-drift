@@ -10,7 +10,8 @@
     "cap:sync": "vite build && cap sync",
     "android": "npm run cap:sync && cap open android",
     "ios": "npm run cap:sync && cap open ios",
-    "assets": "npx @capacitor/assets@3 generate --iconBackgroundColor \"#0a0514\" --iconBackgroundColorDark \"#0a0514\" --splashBackgroundColor \"#0a0514\" --splashBackgroundColorDark \"#0a0514\""
+    "assets": "npx @capacitor/assets@3 generate --iconBackgroundColor \"#0a0514\" --iconBackgroundColorDark \"#0a0514\" --splashBackgroundColor \"#0a0514\" --splashBackgroundColorDark \"#0a0514\"",
+    "prepare": "git config core.hooksPath .githooks"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
