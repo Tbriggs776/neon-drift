@@ -73,13 +73,19 @@ import { initMenuNav, navGamepadFrame } from './menuNav.js';
 import { initNative } from './native.js';
 import { SHIPS, PILOT_COLORS, PILOT_COLOR_NAMES, getShip, drawShipModel, shipGuns } from './ships.js';
 import { linkProgress, queueProgressPush, flushProgressPush } from './progressSync.js';
-import { SECTORS, WAVES_PER_SECTOR, sectorForWave, loopSuffix } from './sectors.js';
+import { SECTORS, WAVES_PER_SECTOR, sectorForWave, loopSuffix } from '../shared/sectors.js';
 import { drawSpaceBackdrop, drawWarp, rgba } from './backdrop.js';
 import {
   makeRockSprite, drawRock, makePanelSprite, drawPanel,
   drawMine, drawWell, drawComet, drawFlare, drawStrike, drawPulse, drawGate
 } from './spaceArt.js';
-import { SPACE_BOSS_DEFS, MINION_DEFS, BOSS_TITLES, updateSpaceEnemy, segDist } from './bosses.js';
+import { SPACE_BOSS_DEFS, MINION_DEFS, BOSS_TITLES, updateSpaceEnemy, unpackBossSync, singularityPull } from '../shared/bosses.js';
+import {
+  segDist, insideObstacle, resolveMove, segmentHitsObstacle as pathHitsObstacle, wrapPosition, freeSpot,
+  generateCover, rockRadius, setupHazards as simSetupHazards, spawnHazard as simSpawnHazard,
+  updateHazards as simUpdateHazards, removeHazard as simRemoveHazard, hazardHitByShot, hazardBlocksShot,
+  damageHazard, applyWellGravity, pullShip, advanceShot, burstRing
+} from '../shared/spaceSim.js';
 import { drawSpaceEnemy, drawBeam } from './bossArt.js';
 
 
@@ -1513,15 +1519,11 @@ function newRun(options = {}) {
 // ============================================================
 // SECTOR MAPS: static cover
 // ============================================================
-// Each regular wave lays out the sector's cover (asteroids, ice, crystal
-// clusters, derelict hull plates, station modules) using one of the
-// sector's layouts. Obstacles are circles ({shape:'circle', x, y, r}) or
-// axis-aligned rects ({shape:'rect', x, y, w, h}). Layouts use their own
-// RNG seeded by the run seed and wave, so a seeded run (the weekly
-// challenge) always gets the same maps. Boss waves stay open.
+// Each regular wave lays out the sector's cover (shared/spaceSim.js:
+// generateCover) and paints its sprites here. Layouts use their own RNG
+// seeded by the run seed and wave, so a seeded run (the weekly challenge)
+// always gets the same maps. Boss waves stay open.
 const TAU = Math.PI * 2;
-const COVER_GAP = 56;      // room left between obstacles so the ship can slip through
-const SPAWN_CLEAR = 130;   // keep the middle and the ship's position clear
 
 const ICE_COLORS = { body: '#9fd8ee', shade: '#2a5a78', rim: '#8ff0ff' };
 const METAL_COLORS = { body: '#4a4e5e', shade: '#16181f', rim: '#ff6b35' };
@@ -1537,98 +1539,11 @@ function rockColors(sector, kind) {
   return sector.rock;
 }
 
-// Candidate centers for a layout. Returns more spots than needed; the
-// caller keeps the ones that fit.
-function layoutSpots(layout, n, rand) {
-  const m = Math.min(W, H) * 0.12;
-  const spots = [];
-  const tries = n * 4;
-  if (layout === 'clusters') {
-    const groups = 2 + Math.floor(rand() * 2);
-    const centers = [];
-    for (let g = 0; g < groups; g++) centers.push({ x: m + rand() * (W - m * 2), y: m + rand() * (H - m * 2) });
-    for (let i = 0; i < tries; i++) {
-      const c = centers[i % groups];
-      const a = rand() * TAU, d = 40 + rand() * 90;
-      spots.push({ x: c.x + Math.cos(a) * d, y: c.y + Math.sin(a) * d });
-    }
-  } else if (layout === 'belt') {
-    // A diagonal band of rock across the arena
-    const flip = rand() < 0.5 ? 1 : -1;
-    for (let i = 0; i < tries; i++) {
-      const t = rand();
-      const x = W * (0.06 + t * 0.88);
-      const y = H * (0.5 + flip * (t - 0.5) * 0.6) + (rand() - 0.5) * 120;
-      spots.push({ x, y });
-    }
-  } else if (layout === 'ring') {
-    const R = Math.min(W, H) * (0.3 + rand() * 0.06);
-    const off = rand() * TAU;
-    for (let i = 0; i < tries; i++) {
-      const a = off + (i / Math.max(1, n)) * TAU + (rand() - 0.5) * 0.3;
-      spots.push({ x: W / 2 + Math.cos(a) * R * (W > H ? 1.35 : 1), y: H / 2 + Math.sin(a) * R });
-    }
-  } else if (layout === 'lanes') {
-    // Two lines of cover with gaps, across the long side of the screen
-    const wide = W >= H;
-    for (let i = 0; i < tries; i++) {
-      const lane = i % 2;
-      const t = 0.1 + rand() * 0.8;
-      const across = 0.28 + lane * 0.44 + (rand() - 0.5) * 0.06;
-      spots.push(wide ? { x: W * t, y: H * across } : { x: W * across, y: H * t });
-    }
-  } else {
-    for (let i = 0; i < tries; i++) spots.push({ x: m + rand() * (W - m * 2), y: m + rand() * (H - m * 2) });
-  }
-  return spots;
-}
-
-// Space objects shrink on small screens so a phone arena isn't wall to wall
-function spaceScale() {
-  return Math.max(0.6, Math.min(1, Math.min(W, H) / 720));
-}
-
-function makeCover(kind, x, y, rand, sector) {
-  const k = spaceScale();
-  if (kind === 'wreck' || kind === 'station') {
-    const long = ((kind === 'station' ? 100 : 90) + rand() * 80) * k;
-    const short = ((kind === 'station' ? 34 : 28) + rand() * 14) * Math.max(0.8, k);
-    const horiz = rand() < 0.6;
-    const w = horiz ? long : short, h = horiz ? short : long;
-    const o = { shape: 'rect', kind, x: x - w / 2, y: y - h / 2, w, h };
-    o.sprite = makePanelSprite(w, h, kind, rockColors(sector, 'metal'), Math.floor(rand() * 1e9));
-    return o;
-  }
-  // Cover rocks run bigger than the drifting ones (max 34) and carry veins
-  const r = ((kind === 'crystal' ? 30 : 38) + rand() * 26) * k;
-  const spriteKind = kind === 'asteroid' ? 'stone' : kind;
-  return {
-    shape: 'circle', kind, x, y,
-    r: r * 0.9,
-    rot: rand() * TAU,
-    spin: (rand() - 0.5) * 0.12,
-    sprite: makeRockSprite(r, spriteKind, rockColors(sector, kind), Math.floor(rand() * 1e9), spriteKind !== 'crystal')
-  };
-}
-
-// Does a new obstacle leave enough room around the others and the ship?
-function coverFits(o, placed, avoid) {
-  const margin = 24;
-  if (o.shape === 'circle') {
-    if (o.x - o.r < margin || o.x + o.r > W - margin || o.y - o.r < margin || o.y + o.r > H - margin) return false;
-  } else if (o.x < margin || o.x + o.w > W - margin || o.y < margin || o.y + o.h > H - margin) return false;
-  for (const a of avoid) {
-    if (obstacleOverlap(a.x, a.y, SPAWN_CLEAR, o)) return false;
-  }
-  for (const p of placed) {
-    if (o.shape === 'circle' && obstacleOverlap(o.x, o.y, o.r + COVER_GAP, p)) return false;
-    if (o.shape === 'rect') {
-      if (p.shape === 'circle' && circleRectOverlap(p.x, p.y, p.r + COVER_GAP, o)) return false;
-      if (p.shape === 'rect' && o.x < p.x + p.w + COVER_GAP && o.x + o.w + COVER_GAP > p.x &&
-          o.y < p.y + p.h + COVER_GAP && o.y + o.h + COVER_GAP > p.y) return false;
-    }
-  }
-  return true;
+// Paint a cover obstacle's sprite (shared by single player and multiplayer).
+function coverSprite(o, sector) {
+  if (o.shape === 'rect') return makePanelSprite(o.w, o.h, o.kind, rockColors(sector, 'metal'), o.seed);
+  const spriteKind = o.kind === 'asteroid' ? 'stone' : o.kind;
+  return makeRockSprite(o.spriteR, spriteKind, rockColors(sector, o.kind), o.seed, spriteKind !== 'crystal');
 }
 
 function generateObstaclesForWave(waveNum, waveInfo) {
@@ -1636,23 +1551,9 @@ function generateObstaclesForWave(waveNum, waveInfo) {
   if (waveInfo && (waveInfo.type === 'mega' || waveInfo.type === 'mini')) return [];
   // Wave 1: always open so new players get comfortable
   if (waveNum === 1) return [];
-  const sector = waveInfo.sector;
-  const cover = sector.cover;
-  const rand = waveRng(waveNum, 0xc0fe);
-  const [lo, hi] = cover.count;
-  const want = lo + Math.floor(rand() * (hi - lo + 1)) + Math.min(2, sector.loop);
-  const layout = cover.layouts[(sector.waveInSector + Math.floor(rand() * 2)) % cover.layouts.length];
-  // Only the middle is kept clear, not the ship's spot, so every pilot on
-  // the same seed gets the same map. startWave nudges the ship out of cover.
-  const avoid = [{ x: W / 2, y: H / 2 }];
-  const placed = [];
-  for (const spot of layoutSpots(layout, want, rand)) {
-    if (placed.length >= want) break;
-    const kind = cover.kinds[Math.floor(rand() * cover.kinds.length)];
-    const o = makeCover(kind, spot.x, spot.y, rand, sector);
-    if (coverFits(o, placed, avoid)) placed.push(o);
-  }
-  return placed;
+  const cover = generateCover(waveInfo.sector, W, H, waveRng(waveNum, 0xc0fe));
+  for (const o of cover) o.sprite = coverSprite(o, waveInfo.sector);
+  return cover;
 }
 
 function startWave(waveNum) {
@@ -1670,29 +1571,9 @@ function startWave(waveNum) {
 
   // If player is inside an obstacle (can happen on resize or wave change),
   // nudge them to the nearest open space
-  if (run.obstacles.length > 0) {
-    const p = run.player;
-    if (isInsideObstacle(p.x, p.y, p.r + 4)) {
-      // Try canvas center first
-      if (!isInsideObstacle(W / 2, H / 2, p.r + 4)) {
-        p.x = W / 2; p.y = H / 2;
-      } else {
-        // Scan outward from center for open space
-        let placed = false;
-        for (let rad = 60; rad < Math.max(W, H) && !placed; rad += 40) {
-          for (let ang = 0; ang < Math.PI * 2; ang += Math.PI / 6) {
-            const tx = W / 2 + Math.cos(ang) * rad;
-            const ty = H / 2 + Math.sin(ang) * rad;
-            if (tx > p.r && tx < W - p.r && ty > p.r && ty < H - p.r && !isInsideObstacle(tx, ty, p.r + 4)) {
-              p.x = tx; p.y = ty;
-              placed = true;
-              break;
-            }
-          }
-        }
-      }
-    }
-  }
+  const spot = freeSpot(run.obstacles, run.player.x, run.player.y, run.player.r, W, H);
+  run.player.x = spot.x;
+  run.player.y = spot.y;
 
   run.spawnQueue = [];
   if (info.type === 'mega' || info.type === 'mini') {
@@ -1916,8 +1797,7 @@ const bossApi = {
   hazard: (kind, props) => spawnHazard(kind, props),
   hazards: () => run.hazards,
   alive: (e) => !!e && !e.dead,
-  pull: (x, y, strength, reach, dt) => pullPlayer(x, y, strength, reach, dt),
-  hurt: () => damagePlayer(1),
+  pull: (x, y, strength, reach, dt) => pullShip(run.obstacles, run.player, x, y, strength, reach, dt),
   explode: (x, y, color, size) => spawnExplosion(x, y, color, size),
   shake: (n) => { run.screenShake = Math.max(run.screenShake, n); },
   sound: playSound
@@ -3707,36 +3587,13 @@ function nukeScreen() {
 // ============================================================
 // SPACE HAZARDS
 // ============================================================
-// Each sector brings its own trouble (see sectors.js `hazards`):
-//   rock    drifting asteroids that wrap around the screen. Shoot them and
-//           they split (big → medium → small), Asteroids style. They hurt
-//           on contact and soak up enemy fire.
-//   mine    proximity mines: arm when you get close, blow after a short
-//           fuse. Shoot one to set it off early; blasts hurt enemies too
-//           and chain into nearby mines.
-//   well    gravity wells: pull your ship and bend every bullet nearby.
-//           The core hurts.
-//   gate    laser fences between two pylons, cycling off / flicker / on.
-//   comet   streaks across the arena after a warning at the edge.
-//   flare   solar flare: a lane flashes a warning, then burns.
-//   strike  ion storm lightning: a marked circle, then a bolt.
-//   pulse   shock rings rolling out from a point. Dash through them.
-// Counts (rocks, mines, wells, gates) are placed when the wave starts.
-// The rest arrive on timers (every N seconds) until the wave is clear.
-const HAZARD_TIMED = ['comets', 'flares', 'strikes', 'pulses'];
-const ROCK_TIERS = {
-  3: { r: 34, hp: 5, score: 15 },
-  2: { r: 20, hp: 3, score: 10 },
-  1: { r: 11, hp: 1, score: 5 }
-};
+// The hazard rules live in shared/spaceSim.js (multiplayer runs the same
+// code on the server). This is single player's side: the "hazard world"
+// the sim plays in, plus sprites, effects and drawing.
 const rockSpriteCache = new Map();
 
-function rockRadius(tier) {
-  return Math.round(ROCK_TIERS[tier].r * (0.75 + spaceScale() * 0.25));
-}
-
 function rockSprite(sector, kind, tier, variant) {
-  const r = rockRadius(tier);
+  const r = rockRadius(tier, W, H);
   const key = `${sector.index}:${kind}:${r}:${variant}`;
   let s = rockSpriteCache.get(key);
   if (!s) {
@@ -3747,258 +3604,69 @@ function rockSprite(sector, kind, tier, variant) {
   return s;
 }
 
+const hazardWorld = {
+  get W() { return W; },
+  get H() { return H; },
+  get sector() { return run.sector; },
+  get hazards() { return run.hazards; },
+  get obstacles() { return run.obstacles; },
+  get clock() { return run.hazardClock; },
+  set clock(v) { run.hazardClock = v; },
+  get wells() { return run.wells; },
+  set wells(v) { run.wells = v; },
+  get diff() { return run.currentWaveInfo ? run.currentWaveInfo.diffMul : 1; },
+  // Once the wave is clear, leftovers can't hurt you (you're picking an upgrade)
+  get live() { return !run.waveCleared; },
+  rand: () => (run.hazardRand || Math.random)(),
+  pilots: () => [run.player],
+  hurt: () => damagePlayer(1),
+  enemies: () => run.enemies,
+  isBoss: (e) => isBossType(e.type),
+  hitEnemy: (e, amt) => {
+    if (damageEnemy(e, amt) && e.hp <= 0) killEnemy(run.enemies.indexOf(e));
+  },
+  enemyShots: () => run.enemyProjectiles,
+  dropShots: (pred) => { run.enemyProjectiles = run.enemyProjectiles.filter((b) => !pred(b)); },
+  rockBroken: (h, shooter, points, dropCore) => {
+    const rim = rockColors(run.sector, h.rockKind === 'stone' ? 'asteroid' : h.rockKind).rim;
+    run.score += points;
+    spawnFloat(h.x, h.y - h.r, `+${points}`, rim, 12);
+    if (dropCore) run.pickups.push({ x: h.x, y: h.y, vx: 0, vy: 0, r: 6, life: 10, type: 'core' });
+  },
+  fx: (type, h) => {
+    if (type === 'debris') {
+      spawnRockDebris(h.x, h.y, h.r, rockColors(run.sector, h.rockKind === 'stone' ? 'asteroid' : h.rockKind).rim);
+    } else if (type === 'mine') {
+      spawnExplosion(h.x, h.y, '#ff3860', h.blast * 0.5);
+      spawnShockwave(h.x, h.y, '#ffb347');
+      run.screenShake = Math.max(run.screenShake, 9);
+    } else if (type === 'wellGone') {
+      spawnShockwave(h.x, h.y, h.color);
+    } else if (type === 'cometTrail') {
+      if (Math.random() < 0.6) {
+        run.particles.push({ x: h.x, y: h.y, vx: -h.vx * 0.1 + (Math.random() - 0.5) * 60, vy: -h.vy * 0.1 + (Math.random() - 0.5) * 60, life: 0.5, maxLife: 0.5, color: '#bff4ff', size: 2 });
+      }
+    } else if (type === 'flare') {
+      run.screenShake = Math.max(run.screenShake, 6);
+    } else if (type === 'strike') {
+      run.screenShake = Math.max(run.screenShake, 8);
+      spawnExplosion(h.x, h.y, '#c08bff', 20);
+    }
+  }
+};
+
 function setupHazards(waveNum, info) {
   run.hazards = [];
-  run.hazardClock = {};
-  run.wells = null;
-  const sector = info.sector;
-  const boss = info.type !== 'regular';
-  const cfg = waveNum === 1 ? {} : boss ? (sector.bossHazards || {}) : (sector.hazards || {});
-  const rand = waveRng(waveNum, 0x4a2a);
-  run.hazardRand = rand;
-  // A little more trouble deeper into a sector, and on every lap of the 20
-  const ramp = (1 + sector.waveInSector * 0.12 + sector.loop * 0.35) * (waveNum === 2 ? 0.6 : 1);
-  run.hazardRamp = ramp;
-  // Phones get fewer rocks and mines than a desktop-sized arena
-  const area = Math.max(0.45, Math.min(1.3, (W * H) / (1280 * 720)));
-  const count = (n) => (n ? Math.max(1, Math.round(n * ramp * area)) : 0);
-  const p = run.player;
-  // Spots are rolled without looking at the ship (same layout for every
-  // pilot on a seed); one that lands on the ship is mirrored across the
-  // arena instead of re-rolled.
-  const openSpot = (d, r) => {
-    for (let k = 0; k < 30; k++) {
-      let x = r + rand() * (W - r * 2), y = r + rand() * (H - r * 2);
-      if (Math.hypot(x - W / 2, y - H / 2) < d * 0.6 || isInsideObstacle(x, y, r + 20)) continue;
-      if (Math.hypot(x - p.x, y - p.y) < d && !isInsideObstacle(W - x, H - y, r + 20)) { x = W - x; y = H - y; }
-      return { x, y };
-    }
-    return null;
-  };
-
-  for (let k = 0; k < count(cfg.rocks); k++) {
-    const at = openSpot(230, 40);
-    if (!at) continue;
-    const a = rand() * TAU, sp = 25 + rand() * 45;
-    spawnHazard('rock', { x: at.x, y: at.y, tier: rand() < 0.7 ? 3 : 2, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, variant: Math.floor(rand() * 4) });
-  }
-  for (let k = 0; k < count(cfg.mines); k++) {
-    const at = openSpot(170, 30);
-    if (at) spawnHazard('mine', at);
-  }
-  for (let k = 0; k < (cfg.wells || 0) + (cfg.wells ? Math.min(1, sector.loop) : 0); k++) {
-    const at = openSpot(260, 60);
-    if (at) spawnHazard('well', at);
-  }
-  for (let k = 0; k < (cfg.gates || 0); k++) {
-    for (let tries = 0; tries < 20; tries++) {
-      const len = 170 + rand() * 150;
-      const a = rand() * Math.PI;
-      const cx = W * (0.2 + rand() * 0.6), cy = H * (0.2 + rand() * 0.6);
-      const x1 = cx - Math.cos(a) * len / 2, y1 = cy - Math.sin(a) * len / 2;
-      const x2 = cx + Math.cos(a) * len / 2, y2 = cy + Math.sin(a) * len / 2;
-      const inside = (x, y) => x > 30 && x < W - 30 && y > 30 && y < H - 30;
-      if (!inside(x1, y1) || !inside(x2, y2)) continue;
-      if (isInsideObstacle(x1, y1, 40) || isInsideObstacle(x2, y2, 40)) continue;
-      if (segDist(W / 2, H / 2, x1, y1, x2, y2) < 90) continue;
-      // Gates start somewhere in their off phase, so there's time to step clear
-      spawnHazard('gate', { x1, y1, x2, y2, offset: rand() * 1.2 });
-      break;
-    }
-  }
-  for (const kind of HAZARD_TIMED) {
-    if (cfg[kind]) {
-      const every = cfg[kind] / Math.sqrt(ramp);
-      run.hazardClock[kind] = { every, left: 2.5 + rand() * every * 0.6 };
-    }
-  }
+  run.hazardRand = waveRng(waveNum, 0x4a2a);
+  simSetupHazards(hazardWorld, waveNum, info.type !== 'regular');
 }
 
-// Make a hazard. Bosses call this too (Colossus calves rocks, Arachne lays
-// mines, Helios throws flares, Singularity opens wells).
-function spawnHazard(kind, props = {}) {
-  const sector = run.sector;
-  const rnd = run.hazardRand || Math.random;   // gameplay rolls; looks can use Math.random
-  const diff = run.currentWaveInfo ? run.currentWaveInfo.diffMul : 1;
-  let h = null;
-  if (kind === 'rock') {
-    const tier = props.tier || 3;
-    const t = ROCK_TIERS[tier];
-    const rk = sector.rockKind || 'stone';
-    const variant = props.variant ?? Math.floor(Math.random() * 4);
-    h = {
-      kind, tier, x: props.x, y: props.y, vx: props.vx || 0, vy: props.vy || 0,
-      r: rockRadius(tier) * 0.92, hp: t.hp * (1 + (diff - 1) * 0.2), rot: Math.random() * TAU,
-      spin: (Math.random() - 0.5) * (4 - tier) * 0.6, rockKind: rk, variant,
-      sprite: rockSprite(sector, rk, tier, variant), hitFlash: 0, owner: props.owner || null
-    };
-  } else if (kind === 'mine') {
-    const a = rnd() * TAU;
-    h = {
-      kind, x: props.x, y: props.y, vx: Math.cos(a) * 8, vy: Math.sin(a) * 8,
-      r: 11, trigger: 72, blast: 88, fuse: 0, fuseMax: 0.7, hp: 1, seed: Math.random() * 10,
-      owner: props.owner || null
-    };
-  } else if (kind === 'well') {
-    h = {
-      kind, x: props.x, y: props.y, core: props.core || 16, reach: props.reach || 240,
-      strength: props.strength || 135, seed: Math.random() * 10, life: props.life || 0,
-      color: '#b847ff', disk: sector.secondary || '#ff9f43',
-      owner: props.owner || null
-    };
-  } else if (kind === 'gate') {
-    const pylonR = 12;
-    h = {
-      kind, x1: props.x1, y1: props.y1, x2: props.x2, y2: props.y2, x: (props.x1 + props.x2) / 2, y: (props.y1 + props.y2) / 2,
-      pylonR, width: 7, t: props.offset || 0, offTime: 2.4, warnTime: 0.7, onTime: 2.2, state: 'off',
-      color: sector.accent
-    };
-    run.obstacles.push({ shape: 'circle', kind: 'pylon', x: props.x1, y: props.y1, r: pylonR, noDraw: true });
-    run.obstacles.push({ shape: 'circle', kind: 'pylon', x: props.x2, y: props.y2, r: pylonR, noDraw: true });
-  } else if (kind === 'comet') {
-    // Enter from a random edge, aimed through the middle of the arena
-    const side = Math.floor(rnd() * 4);
-    const m = 60;
-    let x, y;
-    if (side === 0) { x = rnd() * W; y = -m; }
-    else if (side === 1) { x = W + m; y = rnd() * H; }
-    else if (side === 2) { x = rnd() * W; y = H + m; }
-    else { x = -m; y = rnd() * H; }
-    const tx = W * (0.25 + rnd() * 0.5), ty = H * (0.25 + rnd() * 0.5);
-    const a = Math.atan2(ty - y, tx - x), sp = 560 + rnd() * 120;
-    h = {
-      kind, x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, r: 14, warn: 1.3,
-      markX: Math.max(18, Math.min(W - 18, x)), markY: Math.max(18, Math.min(H - 18, y))
-    };
-  } else if (kind === 'flare') {
-    const axis = props.axis || (rnd() < 0.5 ? 'x' : 'y');
-    const p = run.player;
-    const pos = props.pos ?? (rnd() < 0.5 ? (axis === 'x' ? p.x : p.y) : (axis === 'x' ? W : H) * (0.15 + rnd() * 0.7));
-    h = { kind, axis, pos, half: 36 + rnd() * 16, warn: 1.6, warnMax: 1.6, burn: 0.55, burnMax: 0.55, hit: false, owner: props.owner || null };
-  } else if (kind === 'strike') {
-    const p = run.player;
-    h = {
-      kind, x: Math.max(30, Math.min(W - 30, p.x + (rnd() - 0.5) * 240)),
-      y: Math.max(30, Math.min(H - 30, p.y + (rnd() - 0.5) * 240)),
-      r: 46, warn: 1.1, warnMax: 1.1, burn: 0.25, burnMax: 0.25, struck: false, boltSeed: Math.random()
-    };
-  } else if (kind === 'pulse') {
-    let x = W / 2, y = H / 2;
-    for (let k = 0; k < 10; k++) {
-      x = W * (0.1 + rnd() * 0.8); y = H * (0.1 + rnd() * 0.8);
-      if (Math.hypot(x - run.player.x, y - run.player.y) > 220) break;
-    }
-    h = { kind, x, y, warn: 1.0, warnMax: 1.0, radius: 0, speed: 240, maxRadius: Math.hypot(W, H), thick: 7, hit: false, color: sector.accent };
-  }
-  if (h) run.hazards.push(h);
-  return h;
+function spawnHazard(kind, props) {
+  return simSpawnHazard(hazardWorld, kind, props);
 }
 
-// Gravity on the player from a well or the Singularity
-function pullPlayer(x, y, strength, reach, dt) {
-  const p = run.player;
-  const dx = x - p.x, dy = y - p.y;
-  const d = Math.hypot(dx, dy);
-  if (d > reach || d < 1) return;
-  const f = strength * Math.max(0.3, 1 - d / reach);
-  const res = resolveCircleMove(p.x, p.y, p.x + (dx / d) * f * dt, p.y + (dy / d) * f * dt, p.r);
-  p.x = res.x;
-  p.y = res.y;
-}
-
-// Bend a bullet toward any gravity well in reach. True if it got swallowed.
-function applyWellGravity(b, dt) {
-  for (const w of run.wells) {
-    const dx = w.x - b.x, dy = w.y - b.y;
-    const d = Math.hypot(dx, dy);
-    if (d < w.core) return true;
-    if (d > w.reach) continue;
-    const f = w.strength * 7 * (1 - d / w.reach);
-    b.vx += (dx / d) * f * dt;
-    b.vy += (dy / d) * f * dt;
-  }
-  return false;
-}
-
-function removeHazard(h) {
-  h.dead = true;
-  const i = run.hazards.indexOf(h);
-  if (i >= 0) run.hazards.splice(i, 1);
-}
-
-function hazardHitByShot(pr) {
-  for (const h of run.hazards) {
-    if ((h.kind !== 'rock' && h.kind !== 'mine') || pr.hitIds.has(h)) continue;
-    if (circleHit(pr.x, pr.y, pr.r, h.x, h.y, h.r)) return h;
-  }
-  return null;
-}
-
-function hazardBlocksShot(b) {
-  if (b.orbit) return false;
-  for (const h of run.hazards) {
-    if (h.kind === 'rock' && circleHit(b.x, b.y, b.r, h.x, h.y, h.r)) return true;
-  }
-  return false;
-}
-
-function damageHazard(h, amt) {
-  if (h.kind === 'mine') { explodeMine(h); return; }
-  if (h.kind !== 'rock') return;
-  h.hp -= amt;
-  h.hitFlash = 0.1;
-  if (h.hp <= 0) shatterRock(h, true);
-}
-
-// Split a rock into two smaller ones (or dust if it was small).
-function shatterRock(h, byPlayer) {
-  if (h.dead) return;
-  removeHazard(h);
-  const rim = rockColors(run.sector, h.rockKind === 'stone' ? 'asteroid' : h.rockKind).rim;
-  spawnRockDebris(h.x, h.y, h.r, rim);
-  if (byPlayer) {
-    const pts = ROCK_TIERS[h.tier].score;
-    run.score += pts;
-    spawnFloat(h.x, h.y - h.r, `+${pts}`, rim, 12);
-    if (h.tier === 1 && (run.hazardRand || Math.random)() < 0.3) {
-      run.pickups.push({ x: h.x, y: h.y, vx: 0, vy: 0, r: 6, life: 10, type: 'core' });
-    }
-  }
-  if (h.tier > 1) {
-    const base = Math.atan2(h.vy, h.vx) + Math.PI / 2;
-    const sp = Math.hypot(h.vx, h.vy) * 1.3 + 40;
-    for (const s of [-1, 1]) {
-      const a = base + (s > 0 ? 0 : Math.PI) + ((run.hazardRand || Math.random)() - 0.5) * 0.6;
-      spawnHazard('rock', {
-        x: h.x + Math.cos(a) * h.r * 0.4, y: h.y + Math.sin(a) * h.r * 0.4,
-        tier: h.tier - 1, vx: Math.cos(a) * sp + h.vx * 0.5, vy: Math.sin(a) * sp + h.vy * 0.5, variant: h.variant
-      });
-    }
-  }
-}
-
-function explodeMine(m) {
-  if (m.dead) return;
-  removeHazard(m);
-  spawnExplosion(m.x, m.y, '#ff3860', m.blast * 0.5);
-  spawnShockwave(m.x, m.y, '#ffb347');
-  run.screenShake = Math.max(run.screenShake, 9);
-  const p = run.player;
-  if (!run.waveCleared && Math.hypot(p.x - m.x, p.y - m.y) < m.blast + p.r * 0.5) damagePlayer(1);
-  const diff = run.currentWaveInfo ? run.currentWaveInfo.diffMul : 1;
-  for (const e of [...run.enemies]) {
-    if (e.dead || isBossType(e.type)) continue;
-    if (Math.hypot(e.x - m.x, e.y - m.y) < m.blast + e.r && damageEnemy(e, 5 * Math.sqrt(diff)) && e.hp <= 0) {
-      killEnemy(run.enemies.indexOf(e));
-    }
-  }
-  // Chain reaction: nearby mines go off a beat later
-  for (const o of run.hazards) {
-    if (o.kind === 'mine' && Math.hypot(o.x - m.x, o.y - m.y) < m.blast * 1.4 && (o.fuse <= 0 || o.fuse > 0.15)) {
-      o.fuse = o.fuseMax = 0.15;
-    }
-    if (o.kind === 'rock' && Math.hypot(o.x - m.x, o.y - m.y) < m.blast + o.r) o.hp -= 3;
-  }
+function updateHazards(dt) {
+  simUpdateHazards(hazardWorld, dt);
 }
 
 function spawnRockDebris(x, y, r, rim) {
@@ -4014,153 +3682,17 @@ function spawnRockDebris(x, y, r, rim) {
   run.particles.push({ x, y, vx: 0, vy: 0, life: 0.35, maxLife: 0.35, color: rim, size: r * 0.6, ring: true });
 }
 
-function updateHazards(dt) {
-  const p = run.player;
-  const rand = run.hazardRand || Math.random;
-  // Once the wave is clear, leftovers keep drifting but can't hurt you
-  // (you're picking an upgrade)
-  const live = !run.waveCleared;
-  const hurt = () => { if (live) damagePlayer(1); };
-  // Timed hazards keep coming until the wave is clear
-  if (!run.waveCleared) {
-    for (const kind of HAZARD_TIMED) {
-      const c = run.hazardClock[kind];
-      if (!c) continue;
-      c.left -= dt;
-      if (c.left <= 0) {
-        c.left = c.every * (0.75 + rand() * 0.5);
-        spawnHazard(kind.slice(0, -1));
-      }
-    }
-  }
-
-  let wells = null;
-  // Walk a snapshot: rocks split and comets smash things mid-loop
-  for (const h of run.hazards.slice()) {
-    if (h.dead) continue;
-    if (h.kind === 'rock') {
-      h.x += h.vx * dt;
-      h.y += h.vy * dt;
-      h.rot += h.spin * dt;
-      if (h.hitFlash > 0) h.hitFlash -= dt;
-      // Wrap around the screen like the classic
-      const m = h.r + 4;
-      if (h.x < -m) h.x = W + m; else if (h.x > W + m) h.x = -m;
-      if (h.y < -m) h.y = H + m; else if (h.y > H + m) h.y = -m;
-      // Bounce off static cover
-      for (const o of run.obstacles) {
-        const res = pushOutOf(h.x, h.y, h.r, o);
-        if (!res) continue;
-        h.x = res.x; h.y = res.y;
-        const dot = h.vx * res.nx + h.vy * res.ny;
-        if (dot < 0) { h.vx -= 2 * dot * res.nx; h.vy -= 2 * dot * res.ny; }
-      }
-      if (h.hp <= 0) { shatterRock(h, true); continue; }
-      if (live && p.iframes <= 0 && circleHit(h.x, h.y, h.r, p.x, p.y, p.r)) {
-        damagePlayer(1);
-        shatterRock(h, false);
-      }
-    } else if (h.kind === 'mine') {
-      h.x += h.vx * dt;
-      h.y += h.vy * dt;
-      if (h.x < 30 || h.x > W - 30) h.vx *= -1;
-      if (h.y < 30 || h.y > H - 30) h.vy *= -1;
-      if (h.fuse > 0) {
-        h.fuse -= dt;
-        if (h.fuse <= 0) explodeMine(h);
-      } else if (live && Math.hypot(p.x - h.x, p.y - h.y) < h.trigger) {
-        h.fuse = h.fuseMax = 0.7;
-      }
-    } else if (h.kind === 'well') {
-      (wells || (wells = [])).push(h);
-      if (h.life) {
-        h.life -= dt;
-        if (h.life <= 0) { spawnShockwave(h.x, h.y, h.color); removeHazard(h); continue; }
-      }
-      if (live) pullPlayer(h.x, h.y, h.strength, h.reach, dt);
-      if (p.iframes <= 0 && Math.hypot(p.x - h.x, p.y - h.y) < h.core + p.r) hurt();
-    } else if (h.kind === 'gate') {
-      h.t = (h.t + dt) % (h.offTime + h.warnTime + h.onTime);
-      h.state = h.t < h.offTime ? 'off' : h.t < h.offTime + h.warnTime ? 'warn' : 'on';
-      if (h.state === 'on') {
-        if (p.iframes <= 0 && segDist(p.x, p.y, h.x1, h.y1, h.x2, h.y2) < h.width / 2 + p.r * 0.8) hurt();
-        for (const e of run.enemies) {
-          if (!isBossType(e.type) && segDist(e.x, e.y, h.x1, h.y1, h.x2, h.y2) < h.width / 2 + e.r) {
-            damageEnemy(e, 6 * dt);
-            if (e.hp <= 0) { killEnemy(run.enemies.indexOf(e)); break; }
-          }
-        }
-      }
-    } else if (h.kind === 'comet') {
-      if (h.warn > 0) { h.warn -= dt; continue; }
-      h.x += h.vx * dt;
-      h.y += h.vy * dt;
-      if (Math.random() < 0.6) {
-        run.particles.push({ x: h.x, y: h.y, vx: -h.vx * 0.1 + (Math.random() - 0.5) * 60, vy: -h.vy * 0.1 + (Math.random() - 0.5) * 60, life: 0.5, maxLife: 0.5, color: '#bff4ff', size: 2 });
-      }
-      if (p.iframes <= 0 && circleHit(h.x, h.y, h.r, p.x, p.y, p.r)) hurt();
-      for (const e of [...run.enemies]) {
-        if (!e.dead && !isBossType(e.type) && circleHit(h.x, h.y, h.r, e.x, e.y, e.r) && damageEnemy(e, 8) && e.hp <= 0) {
-          killEnemy(run.enemies.indexOf(e));
-        }
-      }
-      for (const o of [...run.hazards]) {
-        if (o.kind === 'rock' && circleHit(h.x, h.y, h.r, o.x, o.y, o.r)) shatterRock(o, false);
-      }
-      if (h.x < -300 || h.x > W + 300 || h.y < -300 || h.y > H + 300) removeHazard(h);
-    } else if (h.kind === 'flare') {
-      if (h.warn > 0) { h.warn -= dt; continue; }
-      h.burn -= dt;
-      const inBand = (x, y, r) => Math.abs((h.axis === 'x' ? x : y) - h.pos) < h.half + r;
-      if (!h.hit) {
-        h.hit = true;
-        run.screenShake = Math.max(run.screenShake, 6);
-        for (const e of [...run.enemies]) {
-          if (!e.dead && !isBossType(e.type) && inBand(e.x, e.y, e.r) && damageEnemy(e, 4) && e.hp <= 0) killEnemy(run.enemies.indexOf(e));
-        }
-      }
-      if (p.iframes <= 0 && inBand(p.x, p.y, p.r * 0.5)) hurt();
-      // The flare burns away enemy fire in its lane
-      run.enemyProjectiles = run.enemyProjectiles.filter((b) => !inBand(b.x, b.y, 0));
-      if (h.burn <= 0) removeHazard(h);
-    } else if (h.kind === 'strike') {
-      if (h.warn > 0) { h.warn -= dt; continue; }
-      if (!h.struck) {
-        h.struck = true;
-        run.screenShake = Math.max(run.screenShake, 8);
-        spawnExplosion(h.x, h.y, '#c08bff', 20);
-        if (p.iframes <= 0 && Math.hypot(p.x - h.x, p.y - h.y) < h.r + p.r * 0.5) hurt();
-        for (const e of [...run.enemies]) {
-          if (!e.dead && !isBossType(e.type) && Math.hypot(e.x - h.x, e.y - h.y) < h.r + e.r && damageEnemy(e, 6) && e.hp <= 0) killEnemy(run.enemies.indexOf(e));
-        }
-      }
-      h.burn -= dt;
-      if (h.burn <= 0) removeHazard(h);
-    } else if (h.kind === 'pulse') {
-      if (h.warn > 0) { h.warn -= dt; continue; }
-      h.radius += h.speed * dt;
-      const d = Math.hypot(p.x - h.x, p.y - h.y);
-      if (!h.hit && p.iframes <= 0 && Math.abs(d - h.radius) < h.thick + p.r * 0.6) {
-        h.hit = true;
-        hurt();
-      }
-      if (h.radius > h.maxRadius) removeHazard(h);
-    }
-  }
-  run.wells = wells;
-}
-
 // Telegraphs and floor-level hazards go under the action, rocks and mines
-// in the middle, comets and lightning on top.
-function drawHazards(layer, time) {
-  for (const h of run.hazards) {
+// in the middle, comets and lightning on top. `sector` picks rock sprites.
+function drawHazards(layer, time, hazards = run.hazards, sector = run.sector) {
+  for (const h of hazards) {
     if (layer === 'under') {
       if (h.kind === 'flare') drawFlare(ctx, h, W, H, time);
       else if (h.kind === 'gate') drawGate(ctx, h, time);
       else if (h.kind === 'pulse') drawPulse(ctx, h, time);
       else if (h.kind === 'well') drawWell(ctx, h, time);
     } else if (layer === 'mid') {
-      if (h.kind === 'rock') drawRock(ctx, h);
+      if (h.kind === 'rock') drawRock(ctx, { x: h.x, y: h.y, rot: h.rot, hitFlash: h.hitFlash, sprite: rockSprite(sector, h.rockKind, h.tier, h.variant) });
       else if (h.kind === 'mine') drawMine(ctx, h, time);
     } else if (layer === 'over') {
       if (h.kind === 'comet') drawComet(ctx, h, time);
@@ -4475,16 +4007,6 @@ function enemyShoot(x, y, angle, speed, color, opts) {
   return b;
 }
 
-function steerToward(b, tx, ty, maxTurn) {
-  const cur = Math.atan2(b.vy, b.vx);
-  const want = Math.atan2(ty - b.y, tx - b.x);
-  const d = Math.atan2(Math.sin(want - cur), Math.cos(want - cur));
-  const a = cur + Math.max(-maxTurn, Math.min(maxTurn, d));
-  const sp = Math.hypot(b.vx, b.vy);
-  b.vx = Math.cos(a) * sp;
-  b.vy = Math.sin(a) * sp;
-}
-
 function updateProjectiles(dt) {
   const enemies = run.enemies;
   for (let i = run.projectiles.length - 1; i >= 0; i--) {
@@ -4516,7 +4038,7 @@ function updateProjectiles(dt) {
     pr.life -= dt;
 
     // Gravity wells bend your shots too
-    if (run.wells && applyWellGravity(pr, dt)) {
+    if (applyWellGravity(run.wells, pr, dt)) {
       run.projectiles.splice(i, 1);
       continue;
     }
@@ -4549,10 +4071,10 @@ function updateProjectiles(dt) {
     }
 
     // Asteroids and mines take hits (beams punch straight through)
-    const hz = hazardHitByShot(pr);
+    const hz = hazardHitByShot(hazardWorld, pr);
     if (hz) {
       pr.hitIds.add(hz);
-      damageHazard(hz, pr.damage);
+      damageHazard(hazardWorld, hz, pr.damage, true);
       spawnHitParticles(pr.x, pr.y, hz.kind === 'mine' ? '#ff3860' : '#ffffff');
       if (!pr.beam) {
         run.projectiles.splice(i, 1);
@@ -4614,59 +4136,23 @@ function updateEnemyProjectiles(dt) {
   for (let i = run.enemyProjectiles.length - 1; i >= 0; i--) {
     const b = run.enemyProjectiles[i];
     const prevX = b.x, prevY = b.y;
-    b.age += dt;
-    b.life -= dt;
-
-    if (b.delay > 0) {
-      b.delay -= dt;
-    } else if (b.orbit) {
-      // Spiral around a (possibly moving) center
-      const o = b.orbit;
-      let dx = b.x - o.center.x, dy = b.y - o.center.y;
-      let rr = Math.hypot(dx, dy);
-      let th = Math.atan2(dy, dx);
-      rr += o.vr * dt;
-      th += (o.vt / Math.max(rr, 20)) * dt;
-      if (rr <= (o.minR || 8) || o.center.dead) {
-        run.enemyProjectiles.splice(i, 1);
-        continue;
-      }
-      b.x = o.center.x + Math.cos(th) * rr;
-      b.y = o.center.y + Math.sin(th) * rr;
-      b.vx = (b.x - prevX) / Math.max(dt, 1e-4);
-      b.vy = (b.y - prevY) / Math.max(dt, 1e-4);
-    } else {
-      if (b.accel) {
-        const sp = Math.hypot(b.vx, b.vy) || 1;
-        const ns = Math.max(b.minSpeed ?? 30, Math.min(b.maxSpeed ?? 900, sp + b.accel * dt));
-        b.vx *= ns / sp; b.vy *= ns / sp;
-      }
-      if (b.turn) {
-        const c = Math.cos(b.turn * dt), sn = Math.sin(b.turn * dt);
-        const vx = b.vx * c - b.vy * sn;
-        b.vy = b.vx * sn + b.vy * c;
-        b.vx = vx;
-      }
-      if (b.homing && b.age < (b.homeTime ?? 2.2)) steerToward(b, p.x, p.y, b.homing * dt);
-      b.x += b.vx * dt;
-      b.y += b.vy * dt;
+    // Delays, spirals, curves, homing and growth (shared/spaceSim.js)
+    const step = advanceShot(b, dt, p);
+    if (step === 'swallowed') {
+      run.enemyProjectiles.splice(i, 1);
+      continue;
     }
-    if (b.grow && b.r < (b.maxR || 20)) b.r = Math.min(b.maxR || 20, b.r + b.grow * dt);
 
     // Gravity wells bend shots and swallow them
-    if (run.wells && applyWellGravity(b, dt)) {
+    if (applyWellGravity(run.wells, b, dt)) {
       run.enemyProjectiles.splice(i, 1);
       continue;
     }
 
     // Burst shells pop into a ring of shards at the end of their life
-    if (b.burst && b.life <= 0) {
-      const bs = b.burst;
-      const off = (run.bossRand || Math.random)() * Math.PI * 2;
+    if (step === 'burst') {
       run.enemyProjectiles.splice(i, 1);
-      for (let k = 0; k < bs.count; k++) {
-        enemyShoot(b.x, b.y, off + (k / bs.count) * Math.PI * 2, bs.speed, bs.color, { kind: bs.kind || 'orb' });
-      }
+      burstRing(b, enemyShoot, run.bossRand || Math.random);
       spawnHitParticles(b.x, b.y, b.color);
       continue;
     }
@@ -4678,7 +4164,7 @@ function updateEnemyProjectiles(dt) {
       continue;
     }
     // Drifting asteroids soak up shots too
-    if (hazardBlocksShot(b)) {
+    if (hazardBlocksShot(hazardWorld, b)) {
       spawnHitParticles(b.x, b.y, b.color);
       run.enemyProjectiles.splice(i, 1);
       continue;
@@ -4876,7 +4362,7 @@ function bossDeath(e) {
     const h = run.hazards[i];
     if (h.owner !== e) continue;
     spawnExplosion(h.x ?? e.x, h.y ?? e.y, '#ffffff', 10);
-    removeHazard(h);
+    simRemoveHazard(hazardWorld, h);
   }
   run.enemyProjectiles = run.enemyProjectiles.filter((b) => !(b.orbit && b.orbit.center === e));
   const pts = e.parts && e.parts.length ? e.parts : [{ x: e.x, y: e.y }];
@@ -5051,112 +4537,18 @@ function circleHit(x1, y1, r1, x2, y2, r2) {
 // ============================================================
 // OBSTACLE COLLISION HELPERS
 // ============================================================
-// Obstacles are circles (asteroids, ice, crystals, gate pylons) or
-// axis-aligned rects (wreckage, station modules).
-function obstacleOverlap(cx, cy, cr, o) {
-  if (o.shape === 'circle') {
-    const dx = cx - o.x, dy = cy - o.y, rr = cr + o.r;
-    return dx * dx + dy * dy < rr * rr;
-  }
-  return circleRectOverlap(cx, cy, cr, o);
-}
-
-// Check if a circle (x, y, r) overlaps any obstacle
+// Cover collision lives in shared/spaceSim.js; these read run.obstacles.
 function isInsideObstacle(x, y, r) {
-  if (!run || !run.obstacles) return false;
-  for (const o of run.obstacles) {
-    if (obstacleOverlap(x, y, r, o)) return true;
-  }
-  return false;
+  return !!run && insideObstacle(run.obstacles, x, y, r);
 }
 
-// Circle vs axis-aligned rect overlap test
-function circleRectOverlap(cx, cy, cr, rect) {
-  const closestX = Math.max(rect.x, Math.min(cx, rect.x + rect.w));
-  const closestY = Math.max(rect.y, Math.min(cy, rect.y + rect.h));
-  const dx = cx - closestX;
-  const dy = cy - closestY;
-  return (dx * dx + dy * dy) < cr * cr;
-}
-
-// Where a circle overlapping obstacle o has to go to just touch it, plus
-// the surface normal. null if they don't overlap.
-function pushOutOf(cx, cy, cr, o) {
-  if (o.shape === 'circle') {
-    const dx = cx - o.x, dy = cy - o.y;
-    const d = Math.hypot(dx, dy), rr = cr + o.r;
-    if (d >= rr) return null;
-    const nx = d > 1e-3 ? dx / d : 1, ny = d > 1e-3 ? dy / d : 0;
-    return { x: o.x + nx * rr, y: o.y + ny * rr, nx, ny };
-  }
-  const qx = Math.max(o.x, Math.min(cx, o.x + o.w));
-  const qy = Math.max(o.y, Math.min(cy, o.y + o.h));
-  const dx = cx - qx, dy = cy - qy;
-  const d = Math.hypot(dx, dy);
-  if (d >= cr) return null;
-  if (d > 1e-3) return { x: qx + (dx / d) * cr, y: qy + (dy / d) * cr, nx: dx / d, ny: dy / d };
-  // Center inside the rect: leave by the nearest side
-  const left = cx - o.x, right = o.x + o.w - cx, top = cy - o.y, bottom = o.y + o.h - cy;
-  const m = Math.min(left, right, top, bottom);
-  if (m === left) return { x: o.x - cr, y: cy, nx: -1, ny: 0 };
-  if (m === right) return { x: o.x + o.w + cr, y: cy, nx: 1, ny: 0 };
-  if (m === top) return { x: cx, y: o.y - cr, nx: 0, ny: -1 };
-  return { x: cx, y: o.y + o.h + cr, nx: 0, ny: 1 };
-}
-
-// Move a circle from (fromX, fromY) toward (toX, toY), stopping at obstacle
-// edges. Overlaps are pushed out along the surface normal, so the circle
-// slides along walls and curves around rocks. Long moves (dashes) go in
-// small steps so they can't tunnel through thin cover.
 function resolveCircleMove(fromX, fromY, toX, toY, r) {
-  if (!run || !run.obstacles || run.obstacles.length === 0) {
-    return { x: toX, y: toY };
-  }
-  const steps = Math.max(1, Math.ceil(Math.hypot(toX - fromX, toY - fromY) / Math.max(4, r * 0.8)));
-  const sx = (toX - fromX) / steps, sy = (toY - fromY) / steps;
-  let x = fromX, y = fromY;
-  for (let i = 0; i < steps; i++) {
-    x += sx;
-    y += sy;
-    for (let pass = 0; pass < 2; pass++) {
-      for (const o of run.obstacles) {
-        const res = pushOutOf(x, y, r, o);
-        if (res) { x = res.x; y = res.y; }
-      }
-    }
-  }
-  return { x, y };
+  return resolveMove(run && run.obstacles, fromX, fromY, toX, toY, r);
 }
 
-// Check if a line segment from (x1,y1) to (x2,y2) hits any obstacle.
-// Returns the obstacle it hit (for bullet destruction and ricochets).
+// The obstacle a bullet's path crosses (for destruction and ricochets), or null.
 function segmentHitsObstacle(x1, y1, x2, y2) {
-  if (!run || !run.obstacles || run.obstacles.length === 0) return null;
-  for (const o of run.obstacles) {
-    if (o.shape === 'circle' ? segDist(o.x, o.y, x1, y1, x2, y2) < o.r : segmentIntersectsRect(x1, y1, x2, y2, o)) return o;
-  }
-  return null;
-}
-
-function segmentIntersectsRect(x1, y1, x2, y2, rect) {
-  // Quick reject: is either endpoint inside?
-  if (x1 >= rect.x && x1 <= rect.x + rect.w && y1 >= rect.y && y1 <= rect.y + rect.h) return true;
-  if (x2 >= rect.x && x2 <= rect.x + rect.w && y2 >= rect.y && y2 <= rect.y + rect.h) return true;
-  // Test segment against 4 edges of rect
-  const rx = rect.x, ry = rect.y, rw = rect.w, rh = rect.h;
-  if (segmentsIntersect(x1, y1, x2, y2, rx, ry, rx + rw, ry)) return true;
-  if (segmentsIntersect(x1, y1, x2, y2, rx + rw, ry, rx + rw, ry + rh)) return true;
-  if (segmentsIntersect(x1, y1, x2, y2, rx + rw, ry + rh, rx, ry + rh)) return true;
-  if (segmentsIntersect(x1, y1, x2, y2, rx, ry + rh, rx, ry)) return true;
-  return false;
-}
-
-function segmentsIntersect(x1, y1, x2, y2, x3, y3, x4, y4) {
-  const d = (x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3);
-  if (d === 0) return false;
-  const t = ((x3 - x1) * (y4 - y3) - (y3 - y1) * (x4 - x3)) / d;
-  const u = ((x3 - x1) * (y2 - y1) - (y3 - y1) * (x2 - x1)) / d;
-  return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+  return pathHitsObstacle(run && run.obstacles, x1, y1, x2, y2);
 }
 
 // ============================================================
