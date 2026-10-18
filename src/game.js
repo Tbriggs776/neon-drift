@@ -1394,6 +1394,7 @@ function newRun(options = {}) {
     active: true,
     paused: false,
     seed: runSeed,
+    seedInt: getCurrentSeed(),   // runSeed hashed to an int (challenge seeds are strings)
     challengeWeek,
     player: {
       x: W / 2, y: H / 2,
@@ -1496,9 +1497,12 @@ function newRun(options = {}) {
   // Starter augment meta perk (one per level)
   const starterCount = meta.nodes.startCore.level;
   if (starterCount > 0) {
+    // Own seeded stream: wave 1 now starts after the arrival jump, so these
+    // rolls must not shift what the shared stream gives wave 1
+    const starterRand = waveRng(0, 0x57a7);
     const commons = UPGRADES.filter(u => u.rarity === 'common');
     for (let i = 0; i < starterCount; i++) {
-      const choice = commons[Math.floor(gameRand() * commons.length)];
+      const choice = commons[Math.floor(starterRand() * commons.length)];
       applyUpgrade(choice);
     }
     toast(`Starter: ${starterCount} augment${starterCount > 1 ? 's' : ''}`);
@@ -1523,7 +1527,7 @@ const ICE_COLORS = { body: '#9fd8ee', shade: '#2a5a78', rim: '#8ff0ff' };
 const METAL_COLORS = { body: '#4a4e5e', shade: '#16181f', rim: '#ff6b35' };
 
 function waveRng(waveNum, salt) {
-  return makeRng((run.seed ^ Math.imul(waveNum + 1, 2654435761) ^ salt) >>> 0);
+  return makeRng((run.seedInt ^ Math.imul(waveNum + 1, 2654435761) ^ salt) >>> 0);
 }
 
 function rockColors(sector, kind) {
@@ -1638,8 +1642,9 @@ function generateObstaclesForWave(waveNum, waveInfo) {
   const [lo, hi] = cover.count;
   const want = lo + Math.floor(rand() * (hi - lo + 1)) + Math.min(2, sector.loop);
   const layout = cover.layouts[(sector.waveInSector + Math.floor(rand() * 2)) % cover.layouts.length];
+  // Only the middle is kept clear, not the ship's spot, so every pilot on
+  // the same seed gets the same map. startWave nudges the ship out of cover.
   const avoid = [{ x: W / 2, y: H / 2 }];
-  if (run.player) avoid.push({ x: run.player.x, y: run.player.y });
   const placed = [];
   for (const spot of layoutSpots(layout, want, rand)) {
     if (placed.length >= want) break;
@@ -1657,6 +1662,7 @@ function startWave(waveNum) {
   run.currentWaveInfo = info;
   run.sector = info.sector;
   run.beams = [];
+  run.bossRand = waveRng(waveNum, 0xb055);   // boss rolls stay off the shared stream
 
   // Generate obstacles and hazards for this wave
   run.obstacles = generateObstaclesForWave(waveNum, info);
@@ -1871,7 +1877,7 @@ function spawnEnemy(type, scale = 1, diffMul = 1) {
     angle: 0,
     t: 0,
     phase: 0,
-    seed: gameRand() * 10,
+    seed: (run.enemies.length * 2.39996) % 10,   // per-enemy phase offset, no RNG draw
     // Behavioral state
     splitLeft: type === 'splitter' ? 2 : 0,  // splits into 2 mini-grunts on death
     phantomCycle: 0,                         // phantoms fade in/out
@@ -1903,7 +1909,7 @@ const bossApi = {
   get p() { return run.player; },
   get diff() { return run.currentWaveInfo ? run.currentWaveInfo.diffMul : 1; },
   get top() { return hudBottom() + 34; },   // clear of the HUD and boss bar
-  rand: gameRand,
+  rand: () => (run.bossRand || gameRand)(),
   shoot: (x, y, a, speed, color, opts) => enemyShoot(x, y, a, speed, color, opts),
   beam: (owner, opts) => addBeam(owner, opts),
   minion: spawnMinion,
@@ -3757,11 +3763,15 @@ function setupHazards(waveNum, info) {
   const area = Math.max(0.45, Math.min(1.3, (W * H) / (1280 * 720)));
   const count = (n) => (n ? Math.max(1, Math.round(n * ramp * area)) : 0);
   const p = run.player;
-  const farFromShip = (x, y, d) => Math.hypot(x - p.x, y - p.y) > d && Math.hypot(x - W / 2, y - H / 2) > d * 0.6;
+  // Spots are rolled without looking at the ship (same layout for every
+  // pilot on a seed); one that lands on the ship is mirrored across the
+  // arena instead of re-rolled.
   const openSpot = (d, r) => {
     for (let k = 0; k < 30; k++) {
-      const x = r + rand() * (W - r * 2), y = r + rand() * (H - r * 2);
-      if (farFromShip(x, y, d) && !isInsideObstacle(x, y, r + 20)) return { x, y };
+      let x = r + rand() * (W - r * 2), y = r + rand() * (H - r * 2);
+      if (Math.hypot(x - W / 2, y - H / 2) < d * 0.6 || isInsideObstacle(x, y, r + 20)) continue;
+      if (Math.hypot(x - p.x, y - p.y) < d && !isInsideObstacle(W - x, H - y, r + 20)) { x = W - x; y = H - y; }
+      return { x, y };
     }
     return null;
   };
@@ -3790,8 +3800,9 @@ function setupHazards(waveNum, info) {
       const inside = (x, y) => x > 30 && x < W - 30 && y > 30 && y < H - 30;
       if (!inside(x1, y1) || !inside(x2, y2)) continue;
       if (isInsideObstacle(x1, y1, 40) || isInsideObstacle(x2, y2, 40)) continue;
-      if (segDist(p.x, p.y, x1, y1, x2, y2) < 110 || segDist(W / 2, H / 2, x1, y1, x2, y2) < 90) continue;
-      spawnHazard('gate', { x1, y1, x2, y2, offset: rand() * 5 });
+      if (segDist(W / 2, H / 2, x1, y1, x2, y2) < 90) continue;
+      // Gates start somewhere in their off phase, so there's time to step clear
+      spawnHazard('gate', { x1, y1, x2, y2, offset: rand() * 1.2 });
       break;
     }
   }
@@ -3807,6 +3818,7 @@ function setupHazards(waveNum, info) {
 // mines, Helios throws flares, Singularity opens wells).
 function spawnHazard(kind, props = {}) {
   const sector = run.sector;
+  const rnd = run.hazardRand || Math.random;   // gameplay rolls; looks can use Math.random
   const diff = run.currentWaveInfo ? run.currentWaveInfo.diffMul : 1;
   let h = null;
   if (kind === 'rock') {
@@ -3821,7 +3833,7 @@ function spawnHazard(kind, props = {}) {
       sprite: rockSprite(sector, rk, tier, variant), hitFlash: 0, owner: props.owner || null
     };
   } else if (kind === 'mine') {
-    const a = Math.random() * TAU;
+    const a = rnd() * TAU;
     h = {
       kind, x: props.x, y: props.y, vx: Math.cos(a) * 8, vy: Math.sin(a) * 8,
       r: 11, trigger: 72, blast: 88, fuse: 0, fuseMax: 0.7, hp: 1, seed: Math.random() * 10,
@@ -3845,35 +3857,35 @@ function spawnHazard(kind, props = {}) {
     run.obstacles.push({ shape: 'circle', kind: 'pylon', x: props.x2, y: props.y2, r: pylonR, noDraw: true });
   } else if (kind === 'comet') {
     // Enter from a random edge, aimed through the middle of the arena
-    const side = Math.floor(Math.random() * 4);
+    const side = Math.floor(rnd() * 4);
     const m = 60;
     let x, y;
-    if (side === 0) { x = Math.random() * W; y = -m; }
-    else if (side === 1) { x = W + m; y = Math.random() * H; }
-    else if (side === 2) { x = Math.random() * W; y = H + m; }
-    else { x = -m; y = Math.random() * H; }
-    const tx = W * (0.25 + Math.random() * 0.5), ty = H * (0.25 + Math.random() * 0.5);
-    const a = Math.atan2(ty - y, tx - x), sp = 560 + Math.random() * 120;
+    if (side === 0) { x = rnd() * W; y = -m; }
+    else if (side === 1) { x = W + m; y = rnd() * H; }
+    else if (side === 2) { x = rnd() * W; y = H + m; }
+    else { x = -m; y = rnd() * H; }
+    const tx = W * (0.25 + rnd() * 0.5), ty = H * (0.25 + rnd() * 0.5);
+    const a = Math.atan2(ty - y, tx - x), sp = 560 + rnd() * 120;
     h = {
       kind, x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, r: 14, warn: 1.3,
       markX: Math.max(18, Math.min(W - 18, x)), markY: Math.max(18, Math.min(H - 18, y))
     };
   } else if (kind === 'flare') {
-    const axis = props.axis || (Math.random() < 0.5 ? 'x' : 'y');
+    const axis = props.axis || (rnd() < 0.5 ? 'x' : 'y');
     const p = run.player;
-    const pos = props.pos ?? (Math.random() < 0.5 ? (axis === 'x' ? p.x : p.y) : (axis === 'x' ? W : H) * (0.15 + Math.random() * 0.7));
-    h = { kind, axis, pos, half: 36 + Math.random() * 16, warn: 1.6, warnMax: 1.6, burn: 0.55, burnMax: 0.55, hit: false, owner: props.owner || null };
+    const pos = props.pos ?? (rnd() < 0.5 ? (axis === 'x' ? p.x : p.y) : (axis === 'x' ? W : H) * (0.15 + rnd() * 0.7));
+    h = { kind, axis, pos, half: 36 + rnd() * 16, warn: 1.6, warnMax: 1.6, burn: 0.55, burnMax: 0.55, hit: false, owner: props.owner || null };
   } else if (kind === 'strike') {
     const p = run.player;
     h = {
-      kind, x: Math.max(30, Math.min(W - 30, p.x + (Math.random() - 0.5) * 240)),
-      y: Math.max(30, Math.min(H - 30, p.y + (Math.random() - 0.5) * 240)),
+      kind, x: Math.max(30, Math.min(W - 30, p.x + (rnd() - 0.5) * 240)),
+      y: Math.max(30, Math.min(H - 30, p.y + (rnd() - 0.5) * 240)),
       r: 46, warn: 1.1, warnMax: 1.1, burn: 0.25, burnMax: 0.25, struck: false, boltSeed: Math.random()
     };
   } else if (kind === 'pulse') {
     let x = W / 2, y = H / 2;
     for (let k = 0; k < 10; k++) {
-      x = W * (0.1 + Math.random() * 0.8); y = H * (0.1 + Math.random() * 0.8);
+      x = W * (0.1 + rnd() * 0.8); y = H * (0.1 + rnd() * 0.8);
       if (Math.hypot(x - run.player.x, y - run.player.y) > 220) break;
     }
     h = { kind, x, y, warn: 1.0, warnMax: 1.0, radius: 0, speed: 240, maxRadius: Math.hypot(W, H), thick: 7, hit: false, color: sector.accent };
@@ -3909,6 +3921,7 @@ function applyWellGravity(b, dt) {
 }
 
 function removeHazard(h) {
+  h.dead = true;
   const i = run.hazards.indexOf(h);
   if (i >= 0) run.hazards.splice(i, 1);
 }
@@ -3939,16 +3952,15 @@ function damageHazard(h, amt) {
 
 // Split a rock into two smaller ones (or dust if it was small).
 function shatterRock(h, byPlayer) {
-  const idx = run.hazards.indexOf(h);
-  if (idx < 0) return;
-  run.hazards.splice(idx, 1);
+  if (h.dead) return;
+  removeHazard(h);
   const rim = rockColors(run.sector, h.rockKind === 'stone' ? 'asteroid' : h.rockKind).rim;
   spawnRockDebris(h.x, h.y, h.r, rim);
   if (byPlayer) {
     const pts = ROCK_TIERS[h.tier].score;
     run.score += pts;
     spawnFloat(h.x, h.y - h.r, `+${pts}`, rim, 12);
-    if (h.tier === 1 && gameRand() < 0.3) {
+    if (h.tier === 1 && (run.hazardRand || Math.random)() < 0.3) {
       run.pickups.push({ x: h.x, y: h.y, vx: 0, vy: 0, r: 6, life: 10, type: 'core' });
     }
   }
@@ -3956,7 +3968,7 @@ function shatterRock(h, byPlayer) {
     const base = Math.atan2(h.vy, h.vx) + Math.PI / 2;
     const sp = Math.hypot(h.vx, h.vy) * 1.3 + 40;
     for (const s of [-1, 1]) {
-      const a = base + (s > 0 ? 0 : Math.PI) + (Math.random() - 0.5) * 0.6;
+      const a = base + (s > 0 ? 0 : Math.PI) + ((run.hazardRand || Math.random)() - 0.5) * 0.6;
       spawnHazard('rock', {
         x: h.x + Math.cos(a) * h.r * 0.4, y: h.y + Math.sin(a) * h.r * 0.4,
         tier: h.tier - 1, vx: Math.cos(a) * sp + h.vx * 0.5, vy: Math.sin(a) * sp + h.vy * 0.5, variant: h.variant
@@ -3966,9 +3978,8 @@ function shatterRock(h, byPlayer) {
 }
 
 function explodeMine(m) {
-  const idx = run.hazards.indexOf(m);
-  if (idx < 0) return;
-  run.hazards.splice(idx, 1);
+  if (m.dead) return;
+  removeHazard(m);
   spawnExplosion(m.x, m.y, '#ff3860', m.blast * 0.5);
   spawnShockwave(m.x, m.y, '#ffb347');
   run.screenShake = Math.max(run.screenShake, 9);
@@ -4024,9 +4035,9 @@ function updateHazards(dt) {
   }
 
   let wells = null;
-  for (let i = run.hazards.length - 1; i >= 0; i--) {
-    const h = run.hazards[i];
-    if (!h) continue;
+  // Walk a snapshot: rocks split and comets smash things mid-loop
+  for (const h of run.hazards.slice()) {
+    if (h.dead) continue;
     if (h.kind === 'rock') {
       h.x += h.vx * dt;
       h.y += h.vy * dt;
@@ -4651,7 +4662,7 @@ function updateEnemyProjectiles(dt) {
     // Burst shells pop into a ring of shards at the end of their life
     if (b.burst && b.life <= 0) {
       const bs = b.burst;
-      const off = Math.random() * Math.PI * 2;
+      const off = (run.bossRand || Math.random)() * Math.PI * 2;
       run.enemyProjectiles.splice(i, 1);
       for (let k = 0; k < bs.count; k++) {
         enemyShoot(b.x, b.y, off + (k / bs.count) * Math.PI * 2, bs.speed, bs.color, { kind: bs.kind || 'orb' });
@@ -4688,7 +4699,7 @@ function updateEnemyProjectiles(dt) {
       continue;
     }
 
-    if (p.iframes <= 0 && circleHit(b.x, b.y, b.r, p.x, p.y, p.r)) {
+    if (!run.waveCleared && p.iframes <= 0 && circleHit(b.x, b.y, b.r, p.x, p.y, p.r)) {
       damagePlayer(1);
       run.enemyProjectiles.splice(i, 1);
     }
@@ -4865,7 +4876,7 @@ function bossDeath(e) {
     const h = run.hazards[i];
     if (h.owner !== e) continue;
     spawnExplosion(h.x ?? e.x, h.y ?? e.y, '#ffffff', 10);
-    run.hazards.splice(i, 1);
+    removeHazard(h);
   }
   run.enemyProjectiles = run.enemyProjectiles.filter((b) => !(b.orbit && b.orbit.center === e));
   const pts = e.parts && e.parts.length ? e.parts : [{ x: e.x, y: e.y }];
@@ -4974,6 +4985,11 @@ function checkWaveClear() {
   if (run.waveCleared) return;
   if (run.spawnQueue.length === 0 && run.enemies.length === 0) {
     run.waveCleared = true;
+    // Leftover enemy fire (missiles, boulders about to burst) fizzles out,
+    // so nothing can hit you while you pick an upgrade
+    for (const b of run.enemyProjectiles) spawnHitParticles(b.x, b.y, b.color);
+    run.enemyProjectiles = [];
+    run.beams = [];
     setTimeout(() => {
       if (run.active) offerUpgrades();
     }, 800);
@@ -6286,11 +6302,11 @@ function updateHUD() {
     wt.style.textShadow = '';
   }
   const tag = document.getElementById('sectorTag');
-  if (tag && run.sector) {
-    const label = run.isMultiplayer ? '' : sectorLabel(run.sector);
+  if (tag) {
+    const label = run.sector && !run.isMultiplayer ? sectorLabel(run.sector) : '';
     if (tag.textContent !== label) {
       tag.textContent = label;
-      tag.style.color = run.sector.accent;
+      if (run.sector) tag.style.color = run.sector.accent;
     }
   }
   document.getElementById('scoreText').textContent = run.score.toLocaleString();
@@ -6357,6 +6373,7 @@ function gameOver() {
     }
   });
 
+  hideAll();
   document.getElementById('hud').classList.add('hidden');
   document.getElementById('controlsPanel').classList.add('hidden');
   document.getElementById('dsWave').textContent = run.waveNum;
