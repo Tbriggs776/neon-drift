@@ -4,9 +4,14 @@
 [build]
 builder = "NIXPACKS"
 buildCommand = "cd server && npm install"
+# Only server or shared game-rule changes redeploy. A website-only push
+# would otherwise restart the server and end every room in progress.
+watchPatterns = ["server/**", "shared/**", "railway.toml"]
 
 [deploy]
-startCommand = "cd server && npm start"
+# node directly (not npm start) so Railway's shutdown signal reaches the
+# server without npm logging every redeploy as a failed command.
+startCommand = "cd server && node src/index.js"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
 healthcheckPath = "/health"
