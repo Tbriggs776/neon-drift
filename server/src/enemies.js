@@ -114,6 +114,7 @@ function makeEnemy(type, scale, diffMul, worldW, worldH) {
     fireCD: def.fireRate ? Math.random() * def.fireRate : 0,
     fireRate: def.fireRate ? def.fireRate / (1 + (diffMul - 1) * 0.15) : 0,
     vx: 0, vy: 0, angle: 0, t: 0, phase: 0,
+    seed: Math.random() * 10,   // per-enemy phase offset (fighters' weave)
     splitLeft: type === 'splitter' ? 2 : 0,
     phantomCycle: 0,
     charge: 0,

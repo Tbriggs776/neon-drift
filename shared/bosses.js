@@ -681,7 +681,7 @@ function nexus(e, dt, g) {
   e.fence = (e.fence || []).filter((b) => !b.done);
   while (e.fence.length > pairs.length) e.fence.pop().done = true;
   while (e.fence.length < pairs.length) {
-    e.fence.push(g.beam(e, { warn: Math.max(0, 2.2 - e.fenceT), life: 999, width: 8, len: 1, color: '#00f0ff' }));
+    e.fence.push(g.beam(e, { warn: Math.max(0, 2.2 - e.fenceT), life: 999, width: 8, hitWidth: 15, len: 1, color: '#00f0ff' }));
   }
   pairs.forEach(([a1, b1], k) => {
     const bm = e.fence[k];
