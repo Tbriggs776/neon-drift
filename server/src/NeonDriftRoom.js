@@ -1,6 +1,7 @@
 const { Room } = require('colyseus');
-const { Schema, MapSchema, type } = require('@colyseus/schema');
-const { ENEMY_DEFS, isBoss, getWaveInfo, makeEnemy, updateEnemyAI } = require('./enemies');
+const { Schema, MapSchema, ArraySchema, type } = require('@colyseus/schema');
+const { ENEMY_DEFS, isBoss, getWaveInfo, makeEnemy, updateEnemyAI, keepInside } = require('./enemies');
+const { shared } = require('./shared');
 // Ship perks, shared with the client (src/ships.js reads the same file).
 const SHIPS = require('../../shared/ships.json');
 
@@ -25,6 +26,27 @@ const FUSION_PER_BOSS_KILL = 0.35;
 const FUSION_FIRE_CD = 0.3;
 const FUSION_SHOT_DAMAGE = 40;      // one-shots every regular enemy
 const FUSION_SHOT_RADIUS = 16;      // clients draw r >= 12 as fusion rounds
+
+// Space sectors: a hyperspace jump between sectors (and on arrival), bosses
+// stay below the HUD band at the top of the screen, and a cap on boss fire.
+const WARP_TIME = 2.6;
+const BOSS_TOP = 80;
+const ENEMY_SHOT_CAP = 700;
+const SHIP_R = 12;
+// Test hooks (jump to a wave, invulnerable pilot). Only with NEON_DEV=1.
+const DEV = process.env.NEON_DEV === '1';
+
+// Small seeded RNG (mulberry32) so a room's maps follow its seed.
+function makeRng(seed) {
+  let s = (seed >>> 0) || 1;
+  return () => {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 // ============================================================
 // Schema state (only typed fields are sync'd; plain JS fields
@@ -69,6 +91,9 @@ class Player extends Schema {
     this.droneFireCD = 0;
     this.pickedUpgrade = false;
     this.pendingChoices = null;
+    this.r = SHIP_R;    // hit radius for hazards and beams
+    this.sid = '';      // sessionId, so hazards can report who they hit
+    this.god = false;   // dev only
     resetRunStats(this);
   }
 }
@@ -130,9 +155,26 @@ type('int8')(Player.prototype, 'extraShots');
 type('float32')(Player.prototype, 'dashCD');
 type('uint32')(Player.prototype, 'ack');
 
+// One hitbox of a multi-part boss (Leviathan segment, Kraken tip, turret).
+class Part extends Schema {
+  constructor() {
+    super();
+    this.x = 0;
+    this.y = 0;
+    this.r = 10;
+    this.a = 0; // turret aim
+  }
+}
+type('float32')(Part.prototype, 'x');
+type('float32')(Part.prototype, 'y');
+type('float32')(Part.prototype, 'r');
+type('float32')(Part.prototype, 'a');
+
 // Synced fields are what the client needs to draw the single-player art:
 // angle (lancer aim), phase (warden), charge (lancer wind-up) and
-// intangible (phantom blink). AI state from makeEnemy() is server-only.
+// intangible (phantom blink). Sector bosses add `vals` (the fields listed
+// in BOSS_SYNC, shared/bosses.js), `parts`, `shielded` and their adds'
+// `owner`. AI state from makeEnemy() is server-only.
 class Enemy extends Schema {
   constructor() {
     super();
@@ -146,6 +188,10 @@ class Enemy extends Schema {
     this.phase = 0;
     this.charge = 0;
     this.intangible = false;
+    this.owner = '';
+    this.shielded = false;
+    this.vals = new ArraySchema();
+    this.parts = new ArraySchema();
   }
 }
 type('string')(Enemy.prototype, 'type');
@@ -158,6 +204,10 @@ type('float32')(Enemy.prototype, 'angle');
 type('int8')(Enemy.prototype, 'phase');
 type('float32')(Enemy.prototype, 'charge');
 type('boolean')(Enemy.prototype, 'intangible');
+type('string')(Enemy.prototype, 'owner');
+type('boolean')(Enemy.prototype, 'shielded');
+type(['float32'])(Enemy.prototype, 'vals');
+type([Part])(Enemy.prototype, 'parts');
 
 class Projectile extends Schema {
   constructor() {
@@ -172,6 +222,8 @@ class Projectile extends Schema {
     this.vy = 0;
     this.color = '';  // enemy bullet color
     this.crit = false;
+    this.kind = 'orb'; // enemy bullet look: orb, shard, ice, rock, flame, missile, ink
+    this.hold = 0;     // > 0 while the shot hangs in place before moving
     // server-only:
     this.life = 1.5;
     this.pierce = 0;
@@ -192,6 +244,8 @@ type('float32')(Projectile.prototype, 'vx');
 type('float32')(Projectile.prototype, 'vy');
 type('string')(Projectile.prototype, 'color');
 type('boolean')(Projectile.prototype, 'crit');
+type('string')(Projectile.prototype, 'kind');
+type('float32')(Projectile.prototype, 'hold');
 
 // Cores dropped on enemy death; collected on player overlap.
 class Pickup extends Schema {
@@ -208,6 +262,81 @@ type('float32')(Pickup.prototype, 'y');
 type('float32')(Pickup.prototype, 'r');
 type('int16')(Pickup.prototype, 'value');
 
+// Sector hazards (shared/spaceSim.js). One schema covers every kind; each
+// kind fills only the fields it uses.
+const HAZARD_FIELDS = {
+  number: ['x', 'y', 'r', 'vx', 'vy', 'tier', 'variant', 'hp', 'warn', 'warnMax', 'burn', 'burnMax',
+    'fuse', 'fuseMax', 'trigger', 'blast', 'core', 'reach', 'strength', 'life', 'pos', 'half',
+    'x1', 'y1', 'x2', 'y2', 'width', 'pylonR', 'radius', 'thick', 'maxRadius', 'markX', 'markY',
+    'boltSeed', 'seed'],
+  string: ['kind', 'rockKind', 'axis', 'state', 'color', 'disk']
+};
+class Hazard extends Schema {
+  constructor() {
+    super();
+    for (const f of HAZARD_FIELDS.number) this[f] = 0;
+    for (const f of HAZARD_FIELDS.string) this[f] = '';
+  }
+}
+for (const f of HAZARD_FIELDS.number) type('float32')(Hazard.prototype, f);
+for (const f of HAZARD_FIELDS.string) type('string')(Hazard.prototype, f);
+
+// Telegraphed boss lasers (Pulsar, Binary, Dreadnought, Nexus fence).
+class Beam extends Schema {
+  constructor() {
+    super();
+    this.x = 0;
+    this.y = 0;
+    this.angle = 0;
+    this.len = 0;
+    this.width = 10;
+    this.warn = 0;
+    this.warnMax = 1;
+    this.color = '#ffffff';
+    this.owner = '';
+  }
+}
+type('float32')(Beam.prototype, 'x');
+type('float32')(Beam.prototype, 'y');
+type('float32')(Beam.prototype, 'angle');
+type('float32')(Beam.prototype, 'len');
+type('float32')(Beam.prototype, 'width');
+type('float32')(Beam.prototype, 'warn');
+type('float32')(Beam.prototype, 'warnMax');
+type('string')(Beam.prototype, 'color');
+type('string')(Beam.prototype, 'owner');
+
+// Static cover for the current wave. Clients paint sprites from `seed`.
+class Obstacle extends Schema {
+  constructor() {
+    super();
+    this.shape = 'circle';
+    this.kind = 'asteroid';
+    this.x = 0;
+    this.y = 0;
+    this.r = 0;
+    this.w = 0;
+    this.h = 0;
+    this.spriteR = 0;
+    this.rot = 0;
+    this.spin = 0;
+    this.seed = 0;
+    this.noDraw = false;
+  }
+}
+type('string')(Obstacle.prototype, 'shape');
+type('string')(Obstacle.prototype, 'kind');
+type('float32')(Obstacle.prototype, 'x');
+type('float32')(Obstacle.prototype, 'y');
+type('float32')(Obstacle.prototype, 'r');
+type('float32')(Obstacle.prototype, 'w');
+type('float32')(Obstacle.prototype, 'h');
+type('float32')(Obstacle.prototype, 'spriteR');
+type('float32')(Obstacle.prototype, 'rot');
+type('float32')(Obstacle.prototype, 'spin');
+type('uint32')(Obstacle.prototype, 'seed');
+type('boolean')(Obstacle.prototype, 'noDraw');
+
 class RoomState extends Schema {
   constructor() {
     super();
@@ -222,10 +351,17 @@ class RoomState extends Schema {
     this.fusionDriver = ''; // sessionId steering the fused ship
     this.worldW = WORLD_W;
     this.worldH = WORLD_H;
+    this.sectorWave = 1;  // wave whose sector sky is showing (swaps mid-jump)
+    this.warpTime = 0;    // seconds of hyperspace jump left
+    this.warpTo = 0;      // wave the jump is heading to
+    this.mapId = 0;       // bumps whenever the cover changes
     this.players = new MapSchema();
     this.enemies = new MapSchema();
     this.projectiles = new MapSchema();
     this.pickups = new MapSchema();
+    this.hazards = new MapSchema();
+    this.beams = new MapSchema();
+    this.obstacles = new ArraySchema();
   }
 }
 type('string')(RoomState.prototype, 'code');
@@ -243,6 +379,13 @@ type({ map: Player })(RoomState.prototype, 'players');
 type({ map: Enemy })(RoomState.prototype, 'enemies');
 type({ map: Projectile })(RoomState.prototype, 'projectiles');
 type({ map: Pickup })(RoomState.prototype, 'pickups');
+type('int16')(RoomState.prototype, 'sectorWave');
+type('float32')(RoomState.prototype, 'warpTime');
+type('int16')(RoomState.prototype, 'warpTo');
+type('int16')(RoomState.prototype, 'mapId');
+type({ map: Hazard })(RoomState.prototype, 'hazards');
+type({ map: Beam })(RoomState.prototype, 'beams');
+type([Obstacle])(RoomState.prototype, 'obstacles');
 
 // ============================================================
 // Helpers
@@ -343,6 +486,32 @@ function applyUpgrade(player, choice) {
 }
 
 
+// Keep a synced float array in step with a plain one.
+function syncNumbers(arr, vals) {
+  if (arr.length !== vals.length) {
+    arr.clear();
+    arr.push(...vals);
+    return;
+  }
+  for (let i = 0; i < vals.length; i++) if (arr[i] !== vals[i]) arr.setAt(i, vals[i]);
+}
+
+// Keep a boss's synced hitboxes in step with its AI parts.
+function syncParts(arr, parts) {
+  if (arr.length !== parts.length) {
+    arr.clear();
+    for (let i = 0; i < parts.length; i++) arr.push(new Part());
+  }
+  parts.forEach((pt, i) => {
+    const s = arr[i];
+    if (s.x !== pt.x) s.x = pt.x;
+    if (s.y !== pt.y) s.y = pt.y;
+    if (s.r !== pt.r) s.r = pt.r;
+    const a = pt.a || 0;
+    if (s.a !== a) s.a = a;
+  });
+}
+
 // ============================================================
 // Room — lobby + authoritative simulation
 // ============================================================
@@ -363,6 +532,13 @@ class NeonDriftRoom extends Room {
     this.enemyAI = new Map(); // enemy id -> AI state from makeEnemy()
     this.nextEntityId = 1;
     this.upgradePhase = false;
+    this.warp = null;           // { t, toWave, swapped } during a hyperspace jump
+    this.beams = [];            // live boss lasers, mirrored into state.beams
+    this.hazardRand = Math.random;
+    this.bossRand = Math.random;
+    this.target = null;         // the pilot the boss being updated is after
+    this.hw = this.makeHazardWorld();
+    this.bossApi = this.makeBossApi();
 
     this.onMessage('setName', (client, name) => {
       const p = this.state.players.get(client.sessionId);
@@ -398,7 +574,7 @@ class NeonDriftRoom extends Room {
     });
 
     this.onMessage('dash', (client) => {
-      if (!this.state.started || this.state.gameOver || this.upgradePhase) return;
+      if (!this.state.started || this.state.gameOver || this.upgradePhase || this.warp) return;
       const p = this.state.players.get(client.sessionId);
       if (!p || p.dead || (p.dashCD || 0) > 0) return;
       if (this.state.fusionTime > 0 && client.sessionId !== this.state.fusionDriver) return;
@@ -415,8 +591,7 @@ class NeonDriftRoom extends Room {
           dy = Math.sin(inp.aimAngle || 0);
         }
       }
-      p.x = wrap(p.x + dx * 120, WORLD_W);
-      p.y = wrap(p.y + dy * 120, WORLD_H);
+      this.moveShip(p, p.x + dx * 120, p.y + dy * 120);
       p.iframes = 0.35;
       p.dashCD = 1.0 * (p.dashMul || 1);
       this.broadcast('fx', { type: 'dash', x: p.x, y: p.y });
@@ -477,12 +652,42 @@ class NeonDriftRoom extends Room {
         applyShipPerks(pl);
       });
       this.upgradePhase = false;
-      this.startWave(1);
+      this.clearBeams();
+      this.hw.hazards.length = 0;
+      this.setObstacles([]);
+      // Arrive out of hyperspace, then wave 1 starts
+      this.beginWarp(1, true);
       this.broadcast('gameStart', { seed: this.state.seed });
       this.lock();
       // Begin the simulation loop now that the run has started.
       this.setSimulationInterval((dtMs) => this.tick(dtMs / 1000), 1000 / TICK_HZ);
     });
+
+    // Test hooks for local play-testing (NEON_DEV=1 only): jump to a wave,
+    // make your pilot invulnerable, move your pilot, clear the wave.
+    if (DEV) {
+      this.onMessage('devWave', (_client, n) => {
+        if (!this.state.started) return;
+        this.state.enemies.clear();
+        this.enemyAI.clear();
+        this.state.projectiles.clear();
+        this.spawnQueue = [];
+        this.upgradePhase = false;
+        this.beginWarp(Math.max(1, Math.floor(Number(n) || 1)));
+      });
+      this.onMessage('devGod', (client) => {
+        const p = this.state.players.get(client.sessionId);
+        if (p) p.god = true;
+      });
+      this.onMessage('devPos', (client, pos) => {
+        const p = this.state.players.get(client.sessionId);
+        if (p) { p.x = Number(pos?.x) || p.x; p.y = Number(pos?.y) || p.y; }
+      });
+      this.onMessage('devKill', () => {
+        for (const id of [...this.enemyAI.keys()]) this.killEnemyNow(id, null);
+        this.spawnQueue = [];
+      });
+    }
   }
 
   onJoin(client, options) {
@@ -501,6 +706,7 @@ class NeonDriftRoom extends Room {
         if (!this.colorTaken(i)) { player.slot = i; break; }
       }
     }
+    player.sid = client.sessionId;
     this.state.players.set(client.sessionId, player);
   }
 
@@ -529,15 +735,19 @@ class NeonDriftRoom extends Room {
   tick(dt) {
     if (!this.state.started || this.state.gameOver) return;
     if (this.upgradePhase) return; // sim is paused while pilots pick upgrades
+    if (this.warp) { this.updateWarp(dt); return; } // nothing to fight mid-jump
     this.simTime = (this.simTime || 0) + dt;
     this.updateFusion(dt);
     this.updatePlayers(dt);
     this.updateDrones(dt);
     this.updateEnemies(dt);
     this.updateProjectiles(dt);
+    this.updateBeams(dt);
+    this.updateHazards(dt);
     this.collisions(dt);
     this.collectPickups(dt);
     this.updateSpawning(dt);
+    this.mirrorSpace();
     this.checkGameOver();
   }
 
@@ -601,8 +811,7 @@ class NeonDriftRoom extends Room {
         const mag = Math.hypot(mx, my);
         if (mag > 1) { mx /= mag; my /= mag; }
         const speed = BASE_SPEED * (p.speedMul || 1);
-        p.x = wrap(p.x + mx * speed * dt, WORLD_W);
-        p.y = wrap(p.y + my * speed * dt, WORLD_H);
+        this.moveShip(p, p.x + mx * speed * dt, p.y + my * speed * dt);
       }
       p.angle = inp.aimAngle;
       p.ack = inp.seq;
@@ -696,23 +905,43 @@ class NeonDriftRoom extends Room {
   }
 
   updateEnemies(dt) {
+    const { sim, bosses } = shared();
+    const obstacles = this.hw.obstacles;
     const fx = {
       shoot: (x, y, angle, speed, color) => this.spawnEnemyShot(x, y, angle, speed, color),
       spawnAdds: (hive) => {
         if (this.state.enemies.size >= 40) return;
         for (let k = 0; k < 2; k++) {
+          // Adds die with their hive
           this.addEnemy('grunt', 0.5, this.waveInfo ? this.waveInfo.diffMul * 0.6 : 1,
-            hive.x + (Math.random() - 0.5) * 40, hive.y + (Math.random() - 0.5) * 40);
+            hive.x + (Math.random() - 0.5) * 40, hive.y + (Math.random() - 0.5) * 40, hive);
         }
         this.broadcast('fx', { type: 'burst', x: hive.x, y: hive.y, color: '#39ff14' });
+      },
+      // Bosses and phasing phantoms fly over cover; everything else slides along it
+      move: (e, x, y) => {
+        if (e.intangible || isBoss(e.type) || obstacles.length === 0) { e.x = x; e.y = y; return; }
+        const res = sim.resolveMove(obstacles, e.x, e.y, x, y, e.r);
+        e.x = res.x;
+        e.y = res.y;
       }
     };
     this.state.enemies.forEach((e, id) => {
       const ai = this.enemyAI.get(id);
-      if (!ai) return;
+      if (!ai || ai.dead) return;
       const target = this.nearestPilot(ai.x, ai.y);
       if (!target) return;
-      updateEnemyAI(ai, target, dt, WORLD_W, WORLD_H, fx);
+      if (bosses.BOSS_SYNC[ai.ai]) {
+        // Sector bosses and their adds: the same AI as single player
+        ai.t += dt;
+        this.target = target;
+        bosses.updateSpaceEnemy(ai, dt, this.bossApi);
+        fx.move(ai, ai.x + ai.vx * dt, ai.y + ai.vy * dt);
+        if (isBoss(ai.type)) keepInside(ai, WORLD_W, WORLD_H);
+        if (ai.shieldHit > 0) ai.shieldHit -= dt;
+      } else {
+        updateEnemyAI(ai, target, dt, WORLD_W, WORLD_H, fx);
+      }
       e.x = ai.x;
       e.y = ai.y;
       e.angle = ai.angle;
@@ -733,16 +962,84 @@ class NeonDriftRoom extends Room {
     return target;
   }
 
-  // Keeps the synced HP and the AI copy in step.
+  // Keeps the synced HP and the AI copy in step. A shielded boss (Nexus)
+  // shrugs it off: returns false.
   damageEnemy(e, id, amount) {
-    e.hp -= amount;
     const ai = this.enemyAI.get(id);
+    if (ai && ai.shielded) {
+      ai.shieldHit = 0.15;
+      return false;
+    }
+    e.hp -= amount;
     if (ai) ai.hp = e.hp;
+    return true;
+  }
+
+  // Damage from hazards (mines, comets, flares, lightning, gates).
+  hitEnemy(ai, amount, killerSid) {
+    const e = this.state.enemies.get(String(ai.id));
+    if (!e || ai.dead) return;
+    if (this.damageEnemy(e, String(ai.id), amount) && e.hp <= 0) this.killEnemyNow(String(ai.id), killerSid);
+  }
+
+  // Kill outside the collision pass (hazards, dev hooks).
+  killEnemyNow(id, killerSid) {
+    const e = this.state.enemies.get(id);
+    const ai = this.enemyAI.get(id);
+    if (!e || !ai || ai.dead) return;
+    const dying = new Set([id]);
+    this.onEnemyKilled(e, id, killerSid, dying);
+    for (const d of dying) {
+      this.state.enemies.delete(d);
+      this.enemyAI.delete(d);
+    }
+  }
+
+  // Body or any part of a multi-part boss.
+  shotHitsEnemy(proj, e, ai) {
+    const dx = proj.x - e.x, dy = proj.y - e.y, rr = proj.r + e.r;
+    if (dx * dx + dy * dy < rr * rr) return true;
+    if (ai && ai.parts) {
+      for (const pt of ai.parts) {
+        const px = proj.x - pt.x, py = proj.y - pt.y, pr = proj.r + pt.r;
+        if (px * px + py * py < pr * pr) return true;
+      }
+    }
+    return false;
+  }
+
+  // Ship movement: slide along cover, then wrap at the world edge.
+  // The client predicts with the same two calls (mpTick in src/game.js).
+  moveShip(p, x, y) {
+    const { sim } = shared();
+    const res = sim.resolveMove(this.hw.obstacles, p.x, p.y, x, y, SHIP_R);
+    const w = sim.wrapPosition(this.hw.obstacles, res.x, res.y, SHIP_R, WORLD_W, WORLD_H);
+    p.x = w.x;
+    p.y = w.y;
   }
 
   updateProjectiles(dt) {
+    const { sim } = shared();
+    const obstacles = this.hw.obstacles;
+    const wells = this.hw.wells;
     const dead = [];
+    const bursts = [];
     this.state.projectiles.forEach((p, id) => {
+      const prevX = p.x, prevY = p.y;
+      if (p.ownerType === 'enemy') {
+        // Delays, spirals, curves, homing and growth (shared/spaceSim.js)
+        const step = sim.advanceShot(p, dt, this.nearestPilot(p.x, p.y));
+        if (step === 'swallowed') { dead.push(id); return; }
+        p.hold = p.delay > 0 ? p.delay : 0;
+        if (sim.applyWellGravity(wells, p, dt)) { dead.push(id); return; }
+        if (step === 'burst') { dead.push(id); bursts.push(p); return; }
+        // Cover and drifting rocks block enemy fire
+        if (!p.orbit && sim.segmentHitsObstacle(obstacles, prevX, prevY, p.x, p.y)) { dead.push(id); return; }
+        if (sim.hazardBlocksShot(this.hw, p)) { dead.push(id); return; }
+        const m = 40 + p.r;
+        if (p.life <= 0 || p.x < -m || p.x > WORLD_W + m || p.y < -m || p.y > WORLD_H + m) dead.push(id);
+        return;
+      }
       // Smart Rounds: steer gently toward the nearest enemy, keeping speed.
       if (p.homing) {
         let nearest = null, nd = 400;
@@ -765,6 +1062,38 @@ class NeonDriftRoom extends Room {
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.life -= dt;
+      // Gravity wells bend pilots' shots too
+      if (sim.applyWellGravity(wells, p, dt)) { dead.push(id); return; }
+      const fusionRound = p.r >= FUSION_SHOT_RADIUS;
+      // Cover stops shots (or bounces them, with Bouncer). Fusion rounds plough through.
+      const wall = fusionRound ? null : sim.segmentHitsObstacle(obstacles, prevX, prevY, p.x, p.y);
+      if (wall) {
+        if (p.ricochet > 0) {
+          if (wall.shape === 'circle') {
+            const nx0 = prevX - wall.x, ny0 = prevY - wall.y;
+            const nl = Math.hypot(nx0, ny0) || 1;
+            const nx = nx0 / nl, ny = ny0 / nl;
+            const dot = p.vx * nx + p.vy * ny;
+            p.vx -= 2 * dot * nx;
+            p.vy -= 2 * dot * ny;
+          } else if (Math.abs(p.vx) > Math.abs(p.vy)) p.vx *= -1;
+          else p.vy *= -1;
+          p.ricochet--;
+          p.x = prevX;
+          p.y = prevY;
+        } else {
+          dead.push(id);
+          return;
+        }
+      }
+      // Asteroids and mines take hits
+      const hz = sim.hazardHitByShot(this.hw, p);
+      if (hz) {
+        if (!p.hitIds) p.hitIds = new Set();
+        p.hitIds.add(hz);
+        sim.damageHazard(this.hw, hz, p.damage, p.ownerId || true);
+        if (!fusionRound) { dead.push(id); return; }
+      }
       // Bouncer: player bullets reflect off the world edge.
       if (p.ricochet > 0 && p.life > 0) {
         if (p.x < 0 || p.x > WORLD_W) { p.vx *= -1; p.x = clamp(p.x, 0, WORLD_W); p.ricochet--; }
@@ -775,6 +1104,11 @@ class NeonDriftRoom extends Room {
       }
     });
     for (const id of dead) this.state.projectiles.delete(id);
+    // Burst shells pop into rings of shards
+    for (const b of bursts) {
+      sim.burstRing(b, (x, y, a, sp, c, o) => this.spawnEnemyShot(x, y, a, sp, c, o), this.bossRand);
+      this.broadcast('fx', { type: 'burst', x: b.x, y: b.y, color: b.color, size: 12 });
+    }
   }
 
   collisions(dt) {
@@ -790,20 +1124,22 @@ class NeonDriftRoom extends Room {
       if (proj.ownerType !== 'player' || projDeath.has(projId)) return;
       this.state.enemies.forEach((e, eId) => {
         if (projDeath.has(projId) || enemyDeath.has(eId) || e.intangible) return;
-        const dx = proj.x - e.x, dy = proj.y - e.y;
-        const rr = (proj.r + e.r);
-        if (dx * dx + dy * dy >= rr * rr) return;
+        const ai = this.enemyAI.get(eId);
+        if (!this.shotHitsEnemy(proj, e, ai)) return;
         if (!proj.hitIds) proj.hitIds = new Set();
         if (proj.hitIds.has(eId)) return;
         proj.hitIds.add(eId);
-        this.damageEnemy(e, eId, proj.damage);
+        if (!this.damageEnemy(e, eId, proj.damage)) {
+          // Shielded (Nexus): the shot splashes off
+          if (proj.r < FUSION_SHOT_RADIUS) projDeath.add(projId);
+          return;
+        }
         if (proj.explosive) {
           // Payload: half damage to everything nearby.
           this.state.enemies.forEach((other, oId) => {
             if (other === e || enemyDeath.has(oId)) return;
             if (Math.hypot(other.x - proj.x, other.y - proj.y) < 60) {
-              this.damageEnemy(other, oId, proj.damage * 0.5);
-              if (other.hp <= 0) kill(other, oId, proj.ownerId);
+              if (this.damageEnemy(other, oId, proj.damage * 0.5) && other.hp <= 0) kill(other, oId, proj.ownerId);
             }
           });
           this.broadcast('fx', { type: 'burst', x: proj.x, y: proj.y, color: '#ff2d95' });
@@ -862,18 +1198,26 @@ class NeonDriftRoom extends Room {
     });
     for (const id of shotDeath) this.state.projectiles.delete(id);
 
-    this.state.enemies.forEach((e) => {
+    this.state.enemies.forEach((e, eId) => {
       if (e.intangible) return;
+      const ai = this.enemyAI.get(eId);
       this.state.players.forEach((p, sid) => {
         if (p.dead || p.iframes > 0) return;
         const dx = p.x - e.x, dy = p.y - e.y;
         const rr = (10 + e.r);
-        if (dx * dx + dy * dy < rr * rr) this.hurtPlayer(p, sid);
+        if (dx * dx + dy * dy < rr * rr) { this.hurtPlayer(p, sid); return; }
+        // Multi-part bosses: every part is solid
+        for (const pt of (ai && ai.parts) || []) {
+          const px = p.x - pt.x, py = p.y - pt.y, pr = 10 + pt.r;
+          if (px * px + py * py < pr * pr) { this.hurtPlayer(p, sid); return; }
+        }
       });
     });
   }
 
   hurtPlayer(p, sid) {
+    // The fused ship can't be hurt (hazards and beams included)
+    if (p.dead || p.iframes > 0 || p.god || this.state.fusionTime > 0) return;
     // Royal's deflector soaks the hit, then recharges.
     if (p.shieldUp) {
       p.shieldUp = false;
@@ -892,6 +1236,7 @@ class NeonDriftRoom extends Room {
   // splitters) never count an enemy twice.
   onEnemyKilled(e, eId, killerSid, dying) {
     const ai = this.enemyAI.get(eId);
+    if (ai) ai.dead = true;
     const points = ai ? ai.score : 10;
     this.state.totalScore += points;
     const killer = killerSid ? this.state.players.get(killerSid) : null;
@@ -910,7 +1255,8 @@ class NeonDriftRoom extends Room {
       );
     }
     // Client uses this to play explosion SFX + spawn particles.
-    this.broadcast('fx', { type: 'enemyDeath', x: e.x, y: e.y, eType: e.type });
+    this.broadcast('fx', { type: 'enemyDeath', x: e.x, y: e.y, eType: e.type, r: e.r });
+    if (boss && ai) this.bossCleanup(ai, dying);
 
     // Splitters break into two small grunts.
     if (e.type === 'splitter' && ai && ai.splitLeft > 0) {
@@ -1009,6 +1355,7 @@ class NeonDriftRoom extends Room {
     }
     const info = getWaveInfo(num, this.livingPilots());
     this.waveInfo = info;
+    this.setupSector(num, info);
     this.spawnQueue = [];
     if (info.kind === 'mega' || info.kind === 'mini') {
       this.spawnQueue.push({ type: info.bossType, delay: 0.6, scale: info.bossScale });
@@ -1026,7 +1373,312 @@ class NeonDriftRoom extends Room {
       }
     }
     this.spawnTimer = 0;
-    this.broadcast('fx', { type: 'waveStart', wave: num, kind: info.kind, name: info.name });
+    this.broadcast('fx', { type: 'waveStart', wave: num, kind: info.kind, name: info.name, bossType: info.bossType || '' });
+  }
+
+  // ----------------------------------------------------------
+  // Sectors: cover, hazards and the hyperspace jump
+  // ----------------------------------------------------------
+  // Per-wave streams so a room's maps follow its seed.
+  waveRng(num, salt) {
+    return makeRng((this.state.seed ^ Math.imul(num + 1, 2654435761) ^ salt) >>> 0);
+  }
+
+  setupSector(num, info) {
+    const { sim } = shared();
+    this.state.sectorWave = num;
+    this.hw.sector = info.sector;
+    this.hazardRand = this.waveRng(num, 0x4a2a);
+    this.bossRand = this.waveRng(num, 0xb055);
+    this.clearBeams();
+    // Regular waves get the sector's cover; boss waves and wave 1 stay open
+    const cover = info.kind === 'regular' && num > 1
+      ? sim.generateCover(info.sector, WORLD_W, WORLD_H, this.waveRng(num, 0xc0fe))
+      : [];
+    this.setObstacles(cover);
+    sim.setupHazards(this.hw, num, info.kind !== 'regular');
+    this.syncObstacles(); // after setupHazards: gates add their pylons
+    // Nudge ships out of any cover they ended up inside
+    this.state.players.forEach((p) => {
+      if (p.dead) return;
+      const at = sim.freeSpot(this.hw.obstacles, p.x, p.y, SHIP_R, WORLD_W, WORLD_H);
+      p.x = at.x;
+      p.y = at.y;
+    });
+    this.mirrorSpace();
+  }
+
+  setObstacles(list) {
+    this.hw.obstacles = list;
+    this.syncObstacles();
+  }
+
+  syncObstacles() {
+    this.state.obstacles.clear();
+    for (const o of this.hw.obstacles) {
+      const s = new Obstacle();
+      s.shape = o.shape;
+      s.kind = o.kind;
+      s.x = o.x;
+      s.y = o.y;
+      s.r = o.r || 0;
+      s.w = o.w || 0;
+      s.h = o.h || 0;
+      s.spriteR = o.spriteR || 0;
+      s.rot = o.rot || 0;
+      s.spin = o.spin || 0;
+      s.seed = o.seed || 0;
+      s.noDraw = !!o.noDraw;
+      this.state.obstacles.push(s);
+    }
+    this.state.mapId = (this.state.mapId + 1) % 30000;
+  }
+
+  // A jump: stars stretch for half of WARP_TIME, the sky swaps, the new
+  // sector fades in, then its first wave starts. A new run arrives the
+  // same way (arriveOnly skips the departure half). Clients draw it from
+  // state.warpTime.
+  beginWarp(toWave, arriveOnly = false) {
+    this.warp = { t: arriveOnly ? WARP_TIME / 2 : 0, toWave, swapped: false };
+    this.state.warpTime = WARP_TIME - this.warp.t;
+    this.state.warpTo = toWave;
+    this.clearBeams();
+    const shots = [];
+    this.state.projectiles.forEach((p, id) => { if (p.ownerType === 'enemy') shots.push(id); });
+    for (const id of shots) this.state.projectiles.delete(id);
+    if (arriveOnly) this.swapSector();
+    this.mirrorSpace();
+  }
+
+  swapSector() {
+    this.warp.swapped = true;
+    this.state.sectorWave = this.warp.toWave;
+    this.hw.hazards.length = 0;
+    this.setObstacles([]);
+    this.state.pickups.clear();
+    // Everyone comes out of the jump together, in a small ring at the middle
+    const living = [];
+    this.state.players.forEach((p) => { if (!p.dead) living.push(p); });
+    living.forEach((p, i) => {
+      const a = (i / Math.max(1, living.length)) * Math.PI * 2;
+      const rad = living.length > 1 ? 46 : 0;
+      p.x = WORLD_W / 2 + Math.cos(a) * rad;
+      p.y = WORLD_H / 2 + Math.sin(a) * rad;
+    });
+    this.mirrorSpace();
+  }
+
+  updateWarp(dt) {
+    const w = this.warp;
+    w.t += dt;
+    this.state.warpTime = Math.max(0, WARP_TIME - w.t);
+    if (!w.swapped && w.t >= WARP_TIME / 2) this.swapSector();
+    if (w.t >= WARP_TIME) {
+      this.warp = null;
+      this.state.warpTime = 0;
+      this.startWave(w.toWave);
+    }
+  }
+
+  updateHazards(dt) {
+    shared().sim.updateHazards(this.hw, dt);
+  }
+
+  // The "hazard world" shared/spaceSim.js plays in (see its header).
+  makeHazardWorld() {
+    const room = this;
+    return {
+      W: WORLD_W,
+      H: WORLD_H,
+      sector: null,
+      hazards: [],
+      obstacles: [],
+      clock: {},
+      wells: null,
+      live: true,   // the sim pauses during upgrade picks, so hazards are always live here
+      get diff() { return room.waveInfo ? room.waveInfo.diffMul : 1; },
+      rand: () => room.hazardRand(),
+      nextId: () => room.nextEntityId++,
+      pilots: () => {
+        const out = [];
+        room.state.players.forEach((p) => { if (!p.dead) out.push(p); });
+        return out;
+      },
+      hurt: (p) => room.hurtPlayer(p, p.sid),
+      enemies: () => [...room.enemyAI.values()].filter((e) => !e.dead),
+      isBoss: (e) => isBoss(e.type),
+      hitEnemy: (e, amount) => room.hitEnemy(e, amount, null),
+      enemyShots: () => {
+        const out = [];
+        room.state.projectiles.forEach((p) => { if (p.ownerType === 'enemy') out.push(p); });
+        return out;
+      },
+      dropShots: (pred) => {
+        const ids = [];
+        room.state.projectiles.forEach((p, id) => { if (p.ownerType === 'enemy' && pred(p)) ids.push(id); });
+        for (const id of ids) room.state.projectiles.delete(id);
+      },
+      rockBroken: (h, shooter, points, dropCore) => {
+        room.state.totalScore += points;
+        const killer = typeof shooter === 'string' ? room.state.players.get(shooter) : null;
+        if (killer) killer.score += points;
+        if (dropCore) room.spawnPickup(h.x, h.y);
+      },
+      fx: (type, h) => {
+        if (type === 'debris') room.broadcast('fx', { type: 'rockBreak', x: h.x, y: h.y, r: h.r, rockKind: h.rockKind });
+        else if (type === 'mine') room.broadcast('fx', { type: 'mineBlast', x: h.x, y: h.y, blast: h.blast });
+        else if (type === 'strike') room.broadcast('fx', { type: 'strike', x: h.x, y: h.y });
+        else if (type === 'flare') room.broadcast('fx', { type: 'shake', n: 6 });
+        else if (type === 'wellGone') room.broadcast('fx', { type: 'wellGone', x: h.x, y: h.y });
+      }
+    };
+  }
+
+  // The game API the shared boss AI gets (see shared/bosses.js).
+  makeBossApi() {
+    const room = this;
+    return {
+      W: WORLD_W,
+      H: WORLD_H,
+      top: BOSS_TOP,
+      get p() { return room.target; },
+      get diff() { return room.waveInfo ? room.waveInfo.diffMul : 1; },
+      rand: () => room.bossRand(),
+      shoot: (x, y, a, speed, color, opts) => room.spawnEnemyShot(x, y, a, speed, color, opts),
+      beam: (owner, opts) => room.addBeam(owner, opts),
+      minion: (type, x, y, owner) => room.addMinion(type, x, y, owner),
+      hazard: (kind, props) => shared().sim.spawnHazard(room.hw, kind, props),
+      hazards: () => room.hw.hazards,
+      alive: (e) => !!e && !e.dead,
+      pull: (x, y, strength, reach, dt) => {
+        room.state.players.forEach((p) => {
+          if (!p.dead) shared().sim.pullShip(room.hw.obstacles, p, x, y, strength, reach, dt);
+        });
+      },
+      explode: (x, y, color, size) => room.broadcast('fx', { type: 'burst', x, y, color, size }),
+      shake: (n) => room.broadcast('fx', { type: 'shake', n }),
+      sound: (name) => room.broadcast('fx', { type: 'sound', name })
+    };
+  }
+
+  // An add brought in by a boss. Owned adds die with their boss.
+  addMinion(type, x, y, owner) {
+    const info = this.waveInfo;
+    const diff = info ? info.diffMul : 1;
+    const scale = type === 'node' ? (info?.bossScale || 1) * (1 + (diff - 1) * 0.25) : Math.max(0.5, diff * 0.5);
+    return this.addEnemy(type, scale, diff * 0.6, x, y, owner);
+  }
+
+  // When a boss dies its adds die too, and its beams, mines, wells and
+  // orbiting shots go with it.
+  bossCleanup(ai, dying) {
+    for (const [id, other] of this.enemyAI) {
+      if (other.owner !== ai || other.dead || dying.has(id)) continue;
+      const e = this.state.enemies.get(id);
+      if (!e) continue;
+      dying.add(id);
+      this.onEnemyKilled(e, id, null, dying);
+    }
+    for (const b of this.beams) if (b.owner === ai) b.done = true;
+    for (const h of this.hw.hazards.slice()) {
+      if (h.owner !== ai) continue;
+      shared().sim.removeHazard(this.hw, h);
+      this.broadcast('fx', { type: 'burst', x: h.x, y: h.y, color: '#ffffff', size: 10 });
+    }
+    const orbiting = [];
+    this.state.projectiles.forEach((p, id) => { if (p.orbit && p.orbit.center === ai) orbiting.push(id); });
+    for (const id of orbiting) this.state.projectiles.delete(id);
+  }
+
+  // ----------------------------------------------------------
+  // Beams: telegraphed boss lasers. The owner aims them each tick.
+  // ----------------------------------------------------------
+  addBeam(owner, opts) {
+    const b = {
+      id: this.nextEntityId++,
+      owner,
+      x: owner.x, y: owner.y,
+      angle: opts.angle ?? 0,
+      len: opts.len ?? 2400,
+      width: opts.width ?? 12,
+      warn: opts.warn ?? 1,
+      warnMax: opts.warn ?? 1,
+      life: opts.life ?? 1,
+      color: opts.color || '#ffffff',
+      done: false
+    };
+    this.beams.push(b);
+    return b;
+  }
+
+  clearBeams() {
+    for (const b of this.beams) b.done = true;
+    this.beams = [];
+    this.state.beams.clear();
+  }
+
+  updateBeams(dt) {
+    const { segDist } = shared().sim;
+    for (let i = this.beams.length - 1; i >= 0; i--) {
+      const b = this.beams[i];
+      if (b.owner && b.owner.dead) b.done = true;
+      if (b.done) { this.beams.splice(i, 1); continue; }
+      if (b.warn > 0) { b.warn -= dt; continue; }
+      b.life -= dt;
+      if (b.life <= 0) { b.done = true; this.beams.splice(i, 1); continue; }
+      const x2 = b.x + Math.cos(b.angle) * b.len, y2 = b.y + Math.sin(b.angle) * b.len;
+      this.state.players.forEach((p, sid) => {
+        if (p.dead || p.iframes > 0) return;
+        if (segDist(p.x, p.y, b.x, b.y, x2, y2) < b.width / 2 + SHIP_R * 0.7) this.hurtPlayer(p, sid);
+      });
+    }
+  }
+
+  // Copies the space sim (hazards, beams, boss art fields) into the synced
+  // state. Runs once per tick.
+  mirrorSpace() {
+    const { bosses } = shared();
+    const seen = new Set();
+    for (const h of this.hw.hazards) {
+      const key = String(h.id);
+      seen.add(key);
+      let s = this.state.hazards.get(key);
+      if (!s) { s = new Hazard(); this.state.hazards.set(key, s); }
+      for (const f of HAZARD_FIELDS.number) {
+        const v = h[f];
+        if (typeof v === 'number' && Number.isFinite(v) && s[f] !== v) s[f] = v;
+      }
+      for (const f of HAZARD_FIELDS.string) {
+        const v = h[f];
+        if (typeof v === 'string' && s[f] !== v) s[f] = v;
+      }
+    }
+    for (const key of [...this.state.hazards.keys()]) if (!seen.has(key)) this.state.hazards.delete(key);
+
+    seen.clear();
+    for (const b of this.beams) {
+      const key = String(b.id);
+      seen.add(key);
+      let s = this.state.beams.get(key);
+      if (!s) {
+        s = new Beam();
+        s.owner = b.owner && b.owner.id !== undefined ? String(b.owner.id) : '';
+        s.color = b.color;
+        s.warnMax = b.warnMax;
+        this.state.beams.set(key, s);
+      }
+      s.x = b.x; s.y = b.y; s.angle = b.angle; s.len = b.len; s.width = b.width; s.warn = Math.max(0, b.warn);
+    }
+    for (const key of [...this.state.beams.keys()]) if (!seen.has(key)) this.state.beams.delete(key);
+
+    this.state.enemies.forEach((e, id) => {
+      const ai = this.enemyAI.get(id);
+      if (!ai) return;
+      const vals = bosses.packBossSync(ai);
+      if (vals) syncNumbers(e.vals, vals);
+      if (ai.parts) syncParts(e.parts, ai.parts);
+      if (e.shielded !== !!ai.shielded) e.shielded = !!ai.shielded;
+    });
   }
 
   updateSpawning(dt) {
@@ -1043,11 +1695,15 @@ class NeonDriftRoom extends Room {
     }
   }
 
-  // Creates an enemy (at a random edge, or at x/y when given) and its AI state.
-  addEnemy(type, scale, diffMul, x, y) {
-    if (!ENEMY_DEFS[type]) return;
+  // Creates an enemy (at a random edge, or at x/y when given) and its AI
+  // state, which it returns. `owner` (an AI object) makes it a boss's add.
+  addEnemy(type, scale, diffMul, x, y, owner) {
+    if (!ENEMY_DEFS[type]) return null;
     const ai = makeEnemy(type, scale, diffMul, WORLD_W, WORLD_H);
     if (x !== undefined) { ai.x = x; ai.y = y; }
+    const id = String(this.nextEntityId++);
+    ai.id = id;
+    ai.owner = owner || null;
     const e = new Enemy();
     e.type = type;
     e.x = ai.x;
@@ -1055,12 +1711,16 @@ class NeonDriftRoom extends Room {
     e.hp = ai.hp;
     e.maxHp = ai.maxHp;
     e.r = ai.r;
-    const id = String(this.nextEntityId++);
+    e.owner = owner ? String(owner.id) : '';
     this.state.enemies.set(id, e);
     this.enemyAI.set(id, ai);
+    return ai;
   }
 
-  spawnEnemyShot(x, y, angle, speed, color) {
+  // Enemy bullet. `opts` are the extras bosses use (kind, r, life, delay,
+  // orbit, accel, turn, homing, grow, burst; see shared/spaceSim.js).
+  spawnEnemyShot(x, y, angle, speed, color, opts) {
+    if (this.state.projectiles.size >= ENEMY_SHOT_CAP) return null;
     const proj = new Projectile();
     proj.x = x;
     proj.y = y;
@@ -1070,7 +1730,11 @@ class NeonDriftRoom extends Room {
     proj.vx = Math.cos(angle) * speed;
     proj.vy = Math.sin(angle) * speed;
     proj.life = 6;
+    proj.age = 0;
+    if (opts) for (const k of Object.keys(opts)) proj[k] = opts[k];
+    proj.hold = proj.delay > 0 ? proj.delay : 0;
     this.state.projectiles.set(String(this.nextEntityId++), proj);
+    return proj;
   }
 
   // Downed pilots come back once the wave is cleared, beside a living
@@ -1083,8 +1747,10 @@ class NeonDriftRoom extends Room {
       if (!p.dead) return;
       const buddy = living[Math.floor(Math.random() * living.length)];
       const a = Math.random() * Math.PI * 2;
-      p.x = wrap(buddy.x + Math.cos(a) * 70, WORLD_W);
-      p.y = wrap(buddy.y + Math.sin(a) * 70, WORLD_H);
+      const at = shared().sim.freeSpot(this.hw.obstacles,
+        wrap(buddy.x + Math.cos(a) * 70, WORLD_W), wrap(buddy.y + Math.sin(a) * 70, WORLD_H), SHIP_R, WORLD_W, WORLD_H);
+      p.x = at.x;
+      p.y = at.y;
       p.dead = false;
       p.hp = Math.max(1, Math.ceil(p.maxHp / 2));
       p.iframes = 2;
@@ -1131,7 +1797,10 @@ class NeonDriftRoom extends Room {
     if (allPicked) {
       this.upgradePhase = false;
       this.broadcast('wavePhase');
-      this.startWave(this.state.waveNum + 1);
+      const next = this.state.waveNum + 1;
+      // A boss closes out every sector, so the next one starts with a jump
+      if (shared().sectors.sectorForWave(next).waveInSector === 0) this.beginWarp(next);
+      else this.startWave(next);
     }
   }
 

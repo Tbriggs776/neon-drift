@@ -248,13 +248,55 @@ export function getRemoteEnemies() {
   if (!currentRoom || !currentRoom.state) return [];
   const out = [];
   currentRoom.state.enemies.forEach((e, id) => {
+    const parts = [];
+    if (e.parts) e.parts.forEach((pt) => parts.push({ x: pt.x, y: pt.y, r: pt.r, a: pt.a }));
     out.push({
       id, type: e.type, x: e.x, y: e.y, hp: e.hp, maxHp: e.maxHp, r: e.r,
       angle: e.angle || 0, phase: e.phase || 0, charge: e.charge || 0,
-      intangible: !!e.intangible
+      intangible: !!e.intangible,
+      // Sector bosses: art fields (BOSS_SYNC in shared/bosses.js), hitboxes,
+      // shield, and which boss an add belongs to
+      vals: e.vals ? Array.from(e.vals) : [],
+      parts,
+      shielded: !!e.shielded,
+      owner: e.owner || ''
     });
   });
   return out;
+}
+
+// Sector hazards (shared/spaceSim.js), as plain objects.
+export function getRemoteHazards() {
+  if (!currentRoom || !currentRoom.state || !currentRoom.state.hazards) return [];
+  const out = [];
+  currentRoom.state.hazards.forEach((h, id) => out.push({ ...h.toJSON(), id }));
+  return out;
+}
+
+// Boss lasers: position, aim, length, and how much telegraph is left.
+export function getRemoteBeams() {
+  if (!currentRoom || !currentRoom.state || !currentRoom.state.beams) return [];
+  const out = [];
+  currentRoom.state.beams.forEach((b, id) => {
+    out.push({ id, x: b.x, y: b.y, angle: b.angle, len: b.len, width: b.width, warn: b.warn, warnMax: b.warnMax || 1, color: b.color, owner: b.owner });
+  });
+  return out;
+}
+
+// The wave's static cover, and an id that changes whenever it does.
+export function getRemoteCover() {
+  const st = currentRoom?.state;
+  if (!st || !st.obstacles) return { mapId: -1, obstacles: [] };
+  const obstacles = [];
+  st.obstacles.forEach((o) => obstacles.push(o.toJSON()));
+  return { mapId: st.mapId, obstacles };
+}
+
+// Hyperspace jump state: seconds left, where it's going, and which
+// sector's sky is showing.
+export function getWarp() {
+  const st = currentRoom?.state;
+  return { time: st?.warpTime || 0, to: st?.warpTo || 0, sectorWave: st?.sectorWave || 1 };
 }
 
 export function getRemoteProjectiles() {
@@ -264,7 +306,7 @@ export function getRemoteProjectiles() {
     out.push({
       id, x: p.x, y: p.y, r: p.r, ownerType: p.ownerType,
       vx: p.vx || 0, vy: p.vy || 0, color: p.color || '', crit: !!p.crit,
-      owner: p.owner ?? -1
+      owner: p.owner ?? -1, kind: p.kind || 'orb', hold: p.hold || 0
     });
   });
   return out;
@@ -311,4 +353,10 @@ export function getWorldDims() {
 
 export function isRunInRoom() {
   return !!(currentRoom && currentRoom.state?.started);
+}
+
+// Dev builds only: lets play-tests drive the server's test hooks
+// (devWave, devGod, devKill), which the server only accepts with NEON_DEV=1.
+if (import.meta.env.DEV) {
+  window.__ndmp = { send: (type, payload) => currentRoom?.send(type, payload) };
 }

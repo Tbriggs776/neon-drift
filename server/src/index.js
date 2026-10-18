@@ -3,6 +3,8 @@ const express = require('express');
 const { Server } = require('colyseus');
 const { WebSocketTransport } = require('@colyseus/ws-transport');
 const { NeonDriftRoom } = require('./NeonDriftRoom.js');
+const { loadShared } = require('./shared.js');
+const { installSharedDefs } = require('./enemies.js');
 
 const app = express();
 app.use(express.json());
@@ -16,12 +18,15 @@ const gameServer = new Server({
   transport: new WebSocketTransport({ server: httpServer })
 });
 
-gameServer.define('neondrift', NeonDriftRoom);
-
 const port = Number(process.env.PORT) || 2567;
+// The shared game rules (ES modules) load first; rooms need them.
 // Railway (and most cloud hosts) require binding to 0.0.0.0 explicitly
 // so the edge proxy can route traffic to the container.
-gameServer.listen(port, '0.0.0.0').then(() => {
+loadShared().then((shared) => {
+  installSharedDefs(shared.bosses);
+  gameServer.define('neondrift', NeonDriftRoom);
+  return gameServer.listen(port, '0.0.0.0');
+}).then(() => {
   console.log(`[neon-drift-server] listening on 0.0.0.0:${port}`);
 }).catch((err) => {
   console.error('[neon-drift-server] failed to start:', err);

@@ -19,10 +19,8 @@ neon-drift/
 ├── index.html              # Entry HTML (Vite)
 ├── src/
 │   ├── game.js             # Main game loop and logic
-│   ├── sectors.js          # The 20 sectors: sky, cover, hazards, boss
 │   ├── backdrop.js         # Space backdrop (nebulae, stars, planets) + hyperspace jump
 │   ├── spaceArt.js         # Asteroid, wreck and hazard art
-│   ├── bosses.js           # Sector boss stats and attack patterns
 │   ├── bossArt.js          # Sector boss art
 │   ├── leaderboard.js      # Supabase client + score submission
 │   ├── styles.css          # All game styles
@@ -34,6 +32,12 @@ neon-drift/
 │   ├── icon-512.png        # PWA icon
 │   ├── manifest.webmanifest
 │   └── sw.js               # Service worker
+├── shared/                 # Game rules used by both the client and the multiplayer server
+│   ├── sectors.js          # The 20 sectors: sky, cover, hazards, boss
+│   ├── bosses.js           # Sector boss stats and attack patterns
+│   ├── spaceSim.js         # Cover layouts, collision, hazards, fancy enemy shots
+│   └── ships.json          # Ship perks
+├── server/                 # Colyseus multiplayer server (see server/README.md)
 ├── supabase/
 │   └── schema.sql          # Database schema + RLS policies
 ├── android/                # Android + Android TV app (Capacitor)
@@ -75,7 +79,7 @@ A run is a trip through 20 sectors, 5 waves each. The 5th wave of every sector i
 
 **Cover** (asteroids with glowing veins, ice, crystal clusters, derelict hull plates, station modules) blocks ships and bullets on both sides. Layouts are seeded by the run seed, so the weekly challenge gets the same maps for everyone.
 
-**Hazards** are in `game.js` under SPACE HAZARDS:
+**Hazards** are in `shared/spaceSim.js` (single player and the multiplayer server run the same code):
 - Drifting asteroids wrap around the screen and split when shot (big, medium, small), Asteroids style. They hurt on contact and soak up enemy fire.
 - Mines arm when you get close. Shoot one to set it off early; blasts hurt enemies and chain into other mines.
 - Gravity wells pull your ship and bend every bullet nearby.
@@ -84,7 +88,7 @@ A run is a trip through 20 sectors, 5 waves each. The 5th wave of every sector i
 
 Hazards go harmless once a wave is cleared, so nothing hits you while you pick an upgrade. Rock and mine counts scale with screen size.
 
-**Bosses** live in `bosses.js` (attacks) and `bossArt.js` (drawing). They get a small game API instead of reaching into the run, and multi-part bosses (Leviathan's body, the Binary stars, Kraken's arms, the Carrier and Dreadnought turrets) list their hitboxes in `e.parts`.
+**Bosses** live in `shared/bosses.js` (attacks) and `src/bossArt.js` (drawing). They get a small game API instead of reaching into the game, so the multiplayer server runs the same AI. Multi-part bosses (Leviathan's body, the Binary stars, Kraken's arms, the Carrier and Dreadnought turrets) list their hitboxes in `e.parts`.
 
 ### Dev shortcuts
 
@@ -93,7 +97,11 @@ In `npm run dev` only (stripped from production builds):
 - `?god` makes the ship invulnerable
 - `window.__nd` exposes the run, `startWave(n)`, `beginWarp(n)` and `killAll()` in the console
 
-Multiplayer keeps its own server-side wave plan and boss roster (`server/src/enemies.js`); it shares the space backdrops but not the sector hazards or new bosses yet.
+### Multiplayer
+
+Co-op plays the same 20 sectors: cover, hazards, all 17 bosses and the hyperspace jump between sectors. The server runs the simulation from `shared/` and syncs cover, hazards, beams and each boss's art fields (`BOSS_SYNC` in `shared/bosses.js`). Clients predict their own ship with the same collision code, so ships slide along cover without rubber-banding. Hazards and beams can hit any pilot, and the fused ship is immune.
+
+To play-test locally, run the server with `NEON_DEV=1` (see `server/README.md`) and the client with `VITE_COLYSEUS_URL=ws://localhost:2567 npm run dev`. In dev builds `window.__ndmp.send('devWave', 45)` jumps the room to a wave, `devGod` makes your pilot invulnerable, `devPos` moves it and `devKill` clears the wave.
 
 ## First-Time Setup
 
