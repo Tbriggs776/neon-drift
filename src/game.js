@@ -77,6 +77,7 @@ import {
 } from './multiplayer.js';
 import { initMenuNav, navGamepadFrame } from './menuNav.js';
 import { initNative } from './native.js';
+import { initAppLock } from './appLock.js';
 import { SHIPS, PILOT_COLORS, PILOT_COLOR_NAMES, getShip, drawShipModel, shipGuns } from './ships.js';
 import { linkProgress, queueProgressPush, flushProgressPush } from './progressSync.js';
 import { SECTORS, WAVES_PER_SECTOR, sectorForWave, loopSuffix } from '../shared/sectors.js';
@@ -2281,6 +2282,12 @@ initNative({
     if (run && run.active && !run.paused) { togglePause(); return true; }
     return false;
   }
+});
+
+// iOS app: Face ID lock while signed in, on launch and after five minutes away.
+// Pauses a live run before covering it.
+initAppLock({
+  onLock: () => { if (run && run.active && !run.paused) togglePause(); }
 });
 
 // --- Touch ---

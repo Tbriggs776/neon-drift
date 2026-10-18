@@ -410,6 +410,19 @@
   </div>
 </div>
 
+<!-- Lock screen: Face ID in front of the iOS app while signed in (src/appLock.js) -->
+<div id="lockScreen" class="overlay hidden" style="z-index: 200; background: var(--bg);">
+  <div class="card hidden" style="max-width: 420px; text-align: center;">
+    <h1 style="font-size: 34px;">LOCKED</h1>
+    <p class="dim">You're still signed in. Unlock to keep playing.</p>
+    <div id="lockMessage" class="dim" style="font-size: 12px; min-height: 18px; margin-top: 8px;"></div>
+    <div class="btn-row" style="flex-direction: column; align-items: center; gap: 8px;">
+      <button class="btn" id="lockUnlockBtn" data-nav-default>Unlock with Face ID</button>
+      <button class="btn secondary" id="lockPasswordBtn" style="padding: 4px 10px; font-size: 11px;">Sign in with password instead</button>
+    </div>
+  </div>
+</div>
+
 <script type="module" src="/src/game.js"></script>
 <script>
   // Register service worker for offline PWA support. Skipped in the iOS /

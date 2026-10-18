@@ -2,6 +2,7 @@
 // constructing two clients (each one starts its own auth listener).
 
 import { createClient } from '@supabase/supabase-js';
+import { authStorage } from './secureStorage.js';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -25,7 +26,9 @@ if (SUPABASE_URL && SUPABASE_ANON_KEY) {
         // separately and isn't affected by this.
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true
+        detectSessionInUrl: true,
+        // iOS app: the Keychain (secureStorage.js). Elsewhere: localStorage.
+        storage: authStorage
       }
     });
     online = true;
