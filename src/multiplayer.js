@@ -293,10 +293,11 @@ export function getRemoteCover() {
 }
 
 // Hyperspace jump state: seconds left, where it's going, and which
-// sector's sky is showing.
+// sector's sky is showing. `paused`: the server's sim is stopped for
+// upgrade picks.
 export function getWarp() {
   const st = currentRoom?.state;
-  return { time: st?.warpTime || 0, to: st?.warpTo || 0, sectorWave: st?.sectorWave || 1 };
+  return { time: st?.warpTime || 0, to: st?.warpTo || 0, sectorWave: st?.sectorWave || 1, paused: !!st?.paused };
 }
 
 export function getRemoteProjectiles() {

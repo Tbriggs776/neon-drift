@@ -354,6 +354,7 @@ class RoomState extends Schema {
     this.sectorWave = 1;  // wave whose sector sky is showing (swaps mid-jump)
     this.warpTime = 0;    // seconds of hyperspace jump left
     this.warpTo = 0;      // wave the jump is heading to
+    this.paused = false;  // sim stopped while pilots pick upgrades
     this.mapId = 0;       // bumps whenever the cover changes
     this.players = new MapSchema();
     this.enemies = new MapSchema();
@@ -382,6 +383,7 @@ type({ map: Pickup })(RoomState.prototype, 'pickups');
 type('int16')(RoomState.prototype, 'sectorWave');
 type('float32')(RoomState.prototype, 'warpTime');
 type('int16')(RoomState.prototype, 'warpTo');
+type('boolean')(RoomState.prototype, 'paused');
 type('int16')(RoomState.prototype, 'mapId');
 type({ map: Hazard })(RoomState.prototype, 'hazards');
 type({ map: Beam })(RoomState.prototype, 'beams');
@@ -652,6 +654,7 @@ class NeonDriftRoom extends Room {
         applyShipPerks(pl);
       });
       this.upgradePhase = false;
+      this.state.paused = false;
       this.clearBeams();
       this.hw.hazards.length = 0;
       this.setObstacles([]);
@@ -673,6 +676,7 @@ class NeonDriftRoom extends Room {
         this.state.projectiles.clear();
         this.spawnQueue = [];
         this.upgradePhase = false;
+        this.state.paused = false;
         this.beginWarp(Math.max(1, Math.floor(Number(n) || 1)));
       });
       this.onMessage('devGod', (client) => {
@@ -1580,10 +1584,12 @@ class NeonDriftRoom extends Room {
       this.onEnemyKilled(e, id, null, dying);
     }
     for (const b of this.beams) if (b.owner === ai) b.done = true;
+    this.beams = this.beams.filter((b) => !b.done);
     for (const h of this.hw.hazards.slice()) {
       if (h.owner !== ai) continue;
       shared().sim.removeHazard(this.hw, h);
-      this.broadcast('fx', { type: 'burst', x: h.x, y: h.y, color: '#ffffff', size: 10 });
+      // Flares have no position of their own
+      this.broadcast('fx', { type: 'burst', x: h.x ?? ai.x, y: h.y ?? ai.y, color: '#ffffff', size: 10 });
     }
     const orbiting = [];
     this.state.projectiles.forEach((p, id) => { if (p.orbit && p.orbit.center === ai) orbiting.push(id); });
@@ -1601,6 +1607,7 @@ class NeonDriftRoom extends Room {
       angle: opts.angle ?? 0,
       len: opts.len ?? 2400,
       width: opts.width ?? 12,
+      hitWidth: opts.hitWidth ?? opts.width ?? 12,  // can be wider than drawn (Nexus fence)
       warn: opts.warn ?? 1,
       warnMax: opts.warn ?? 1,
       life: opts.life ?? 1,
@@ -1629,7 +1636,7 @@ class NeonDriftRoom extends Room {
       const x2 = b.x + Math.cos(b.angle) * b.len, y2 = b.y + Math.sin(b.angle) * b.len;
       this.state.players.forEach((p, sid) => {
         if (p.dead || p.iframes > 0) return;
-        if (segDist(p.x, p.y, b.x, b.y, x2, y2) < b.width / 2 + SHIP_R * 0.7) this.hurtPlayer(p, sid);
+        if (segDist(p.x, p.y, b.x, b.y, x2, y2) < b.hitWidth / 2 + SHIP_R * 0.7) this.hurtPlayer(p, sid);
       });
     }
   }
@@ -1657,6 +1664,7 @@ class NeonDriftRoom extends Room {
 
     seen.clear();
     for (const b of this.beams) {
+      if (b.done) continue;
       const key = String(b.id);
       seen.add(key);
       let s = this.state.beams.get(key);
@@ -1775,6 +1783,7 @@ class NeonDriftRoom extends Room {
     this.state.projectiles.forEach((proj, id) => { if (proj.ownerType === 'enemy') stray.push(id); });
     for (const id of stray) this.state.projectiles.delete(id);
     this.upgradePhase = true;
+    this.state.paused = true;
     for (const [p] of alive) {
       p.pickedUpgrade = false;
       p.pendingChoices = pickUpgradeChoices(p, this.state.waveNum);
@@ -1796,6 +1805,7 @@ class NeonDriftRoom extends Room {
     });
     if (allPicked) {
       this.upgradePhase = false;
+      this.state.paused = false;
       this.broadcast('wavePhase');
       const next = this.state.waveNum + 1;
       // A boss closes out every sector, so the next one starts with a jump

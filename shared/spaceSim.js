@@ -314,6 +314,8 @@ export function rockRadius(tier, W, H) {
 function randomPilot(hw) {
   const pilots = hw.pilots();
   if (!pilots.length) return { x: hw.W / 2, y: hw.H / 2 };
+  // One pilot: no roll, so single player's seeded stream stays as it was
+  if (pilots.length === 1) return pilots[0];
   return pilots[Math.floor(hw.rand() * pilots.length) % pilots.length];
 }
 

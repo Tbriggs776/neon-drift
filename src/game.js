@@ -565,7 +565,8 @@ function mpTick(t, dt) {
   // Mid-jump the server holds every ship still; ride along like a Fusion
   // passenger does.
   const warp = getWarp();
-  const passenger = (fusion.time > 0 && fusion.driver !== fusion.mySession) || warp.time > 0;
+  // The server also stands still while pilots pick upgrades
+  const passenger = (fusion.time > 0 && fusion.driver !== fusion.mySession) || warp.time > 0 || warp.paused;
   if (warp.time > 0 && !run.mpWarping) {
     run.mpWarping = true;
     showSectorCard(sectorForWave(warp.to || 1), warp.time);
@@ -4329,6 +4330,7 @@ function addBeam(owner, opts) {
     angle: opts.angle ?? 0,
     len: opts.len ?? 2400,
     width: opts.width ?? 12,
+    hitWidth: opts.hitWidth ?? opts.width ?? 12,  // can be wider than drawn (Nexus fence)
     warn: opts.warn ?? 1,
     warnMax: opts.warn ?? 1,
     life: opts.life ?? 1,
@@ -4349,7 +4351,7 @@ function updateBeams(dt) {
     b.life -= dt;
     if (b.life <= 0) { b.done = true; run.beams.splice(i, 1); continue; }
     const x2 = b.x + Math.cos(b.angle) * b.len, y2 = b.y + Math.sin(b.angle) * b.len;
-    if (p.iframes <= 0 && segDist(p.x, p.y, b.x, b.y, x2, y2) < b.width / 2 + p.r * 0.7) damagePlayer(1);
+    if (p.iframes <= 0 && segDist(p.x, p.y, b.x, b.y, x2, y2) < b.hitWidth / 2 + p.r * 0.7) damagePlayer(1);
   }
 }
 
