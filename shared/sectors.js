@@ -13,6 +13,7 @@
 //             counts: rocks, mines, wells, gates (alive for the wave)
 //             every-N-seconds: comets, flares, strikes, pulses
 //   boss      the enemy type that guards the sector's jump gate
+//   altBoss   optional second guard; it and `boss` take turns week by week
 //   rock      asteroid colors for this sector (body, shade, rim glow)
 // ============================================================
 
@@ -191,7 +192,8 @@ export const SECTORS = [
     hazards: { rocks: 2, mines: 2 },
     rockKind: 'crystal',
     rock: { body: '#6a5aa8', shade: '#1e1638', rim: '#5ac8fa' },
-    boss: 'prism'
+    boss: 'prism',
+    altBoss: 'mirage'
   },
   {
     name: 'ABYSSAL VOID', tagline: 'Something long is swimming',
@@ -321,8 +323,23 @@ export function sectorForWave(waveNum) {
     number: number + 1,
     loop,
     waveInSector: (Math.max(1, waveNum) - 1) % WAVES_PER_SECTOR,  // 0..4, 4 = boss
-    ...SECTORS[index]
+    ...SECTORS[index],
+    boss: sectorBoss(SECTORS[index])
   };
+}
+
+// Weeks since the Monday of 1970-01-05 (UTC). Every pilot, and the server,
+// agrees on it without talking to anyone.
+export function weekIndex(now = Date.now()) {
+  return Math.floor((now / 864e5 + 3) / 7);
+}
+
+// A sector with an altBoss swaps guards each week. Mirage debuted the week
+// of 2026-10-19 (week 2964), so even weeks from then are the altBoss's.
+const ALT_BOSS_DEBUT_WEEK = 2964;
+export function sectorBoss(sector, now = Date.now()) {
+  if (!sector.altBoss) return sector.boss;
+  return (weekIndex(now) - ALT_BOSS_DEBUT_WEEK) % 2 === 0 ? sector.altBoss : sector.boss;
 }
 
 // " II", " III"... appended to a sector or boss name on later loops.

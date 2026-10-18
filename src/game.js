@@ -38,8 +38,12 @@ import {
 import {
   getCurrentChallengeWeek,
   getCurrentChallengeSeed,
-  fetchChallengeLeaderboard
+  getPreviousChallengeWeek,
+  formatChallengeWeek,
+  fetchChallengeLeaderboard,
+  fetchChallengeStanding
 } from './challenges.js';
+import { weeklyChallenge, weeklySectorForWave, TWISTS, RULES } from './weekly.js';
 import {
   multiplayerEnabled,
   onMultiplayerChange,
@@ -378,9 +382,20 @@ function nodeCost(node) {
 //   - New enemy types unlock as waves climb
 const WAVE_NAMES_REGULAR = ['SWARM', 'LATTICE', 'FRACTURE', 'CASCADE', 'BREACH', 'TEMPEST', 'RIPTIDE', 'ECLIPSE', 'VORTEX', 'SURGE'];
 
+// The sector a solo wave is in: the weekly challenge flies its own route
+// (weekly.js), every other run the 20 sectors.
+function runSector(waveNum) {
+  return run && run.challenge ? weeklySectorForWave(run.challenge, waveNum) : sectorForWave(waveNum);
+}
+
+// A weekly challenge rule (weekly.js RULES) is on for this run.
+function hasRule(rule) {
+  return !!(run && run.challenge && run.challenge.rules.includes(rule));
+}
+
 function getWaveInfo(waveNum) {
   // waveNum is 1-indexed for display purposes
-  const sector = sectorForWave(waveNum);
+  const sector = runSector(waveNum);
   const isMegaBoss = waveNum % 25 === 0;
   const isMiniBoss = sector.waveInSector === WAVES_PER_SECTOR - 1 && !isMegaBoss;
   const loop = Math.floor((waveNum - 1) / 25); // 0, 1, 2...
@@ -401,10 +416,12 @@ function getWaveInfo(waveNum) {
     // Each sector has its own boss; toughness climbs every 25 waves and the
     // name gains a +N each time the 20-sector rotation comes back around.
     const bossType = sector.boss;
+    // Weekly challenge bosses carry twists, and wear the first one in their name
+    const twists = sector.twists || [];
     return {
       type: 'mini', waveNum, sector, loop, diffMul,
-      name: bossType.toUpperCase() + (sector.loop > 0 ? ` +${sector.loop}` : ''),
-      bossType, bossScale: 1 + loop * 0.35
+      name: (twists.length ? TWISTS[twists[0]].name + ' ' : '') + bossType.toUpperCase() + (sector.loop > 0 ? ` +${sector.loop}` : ''),
+      bossType, bossScale: 1 + loop * 0.35, twists
     };
   }
   // Regular wave
@@ -420,7 +437,7 @@ function getWaveInfo(waveNum) {
   // Enemy count: gentler early growth so wave 3 isn't 12 enemies
   // Wave 1: 7, wave 3: 9, wave 5: 11, wave 10: 16, capped at 34
   const baseCount = 6 + Math.floor(waveNum * 0.9);
-  const enemyCount = Math.min(baseCount, 34);
+  const enemyCount = hasRule('swarm') ? Math.min(Math.round(baseCount * 1.4), 48) : Math.min(baseCount, 34);
   const name = WAVE_NAMES_REGULAR[(waveNum - 1) % WAVE_NAMES_REGULAR.length];
   return {
     type: 'regular', waveNum, sector, loop, diffMul,
@@ -441,7 +458,8 @@ if (import.meta.env.DEV) {
     get run() { return run; },
     startWave: (n) => startWave(n),
     beginWarp: (n) => beginWarp(n),
-    killAll: () => { while (run.enemies.length) killEnemy(0); run.spawnQueue = []; }
+    killAll: () => { while (run.enemies.length) killEnemy(0); run.spawnQueue = []; },
+    kill: (e) => killEnemy(run.enemies.indexOf(e))
   };
 }
 
@@ -1521,6 +1539,7 @@ function newRun(options = {}) {
     : Math.floor(Math.random() * 0x7fffffff);
   setRandomSeed(runSeed);
   const challengeWeek = options.challengeWeek || null;
+  const challenge = challengeWeek ? weeklyChallenge(challengeWeek) : null;
   const startingCores = meta.nodes.startBank.level * 3;
   startBGM();
   run = {
@@ -1529,6 +1548,7 @@ function newRun(options = {}) {
     seed: runSeed,
     seedInt: getCurrentSeed(),   // runSeed hashed to an int (challenge seeds are strings)
     challengeWeek,
+    challenge,                   // this week's route, boss twists and rules (weekly.js)
     player: {
       x: W / 2, y: H / 2,
       vx: 0, vy: 0,
@@ -1583,7 +1603,7 @@ function newRun(options = {}) {
     hazards: [],          // sector hazards: asteroids, mines, gravity wells, comets, flares...
     hazardClock: {},      // countdowns for timed hazards (comets, flares, strikes, pulses)
     beams: [],            // telegraphed boss lasers
-    sector: sectorForWave(1),
+    sector: challenge ? weeklySectorForWave(challenge, 1) : sectorForWave(1),
     warp: null,           // hyperspace jump between sectors
     fxQueue: [],          // delayed explosions (boss death chains)
     flash: 0,             // white screen flash
@@ -1618,6 +1638,11 @@ function newRun(options = {}) {
   run.player.ship = ship.id;
   run.player.color = currentColor();
   applyShipPerks(ship);
+  if (hasRule('glass')) {
+    run.player.maxHp = 1;
+    run.player.hp = 1;
+    run.weapons.damage *= 2;
+  }
   meta.totalRuns++;
   saveMeta();
   updateHUD();
@@ -1705,7 +1730,7 @@ function startWave(waveNum) {
   run.spawnQueue = [];
   if (info.type === 'mega' || info.type === 'mini') {
     playSound('bosswarn');
-    run.spawnQueue.push({ type: info.bossType, delay: 0.6, scale: info.bossScale, diff: info.diffMul });
+    run.spawnQueue.push({ type: info.bossType, delay: 0.6, scale: info.bossScale, diff: info.diffMul, twists: info.twists });
   } else {
     for (let i = 0; i < info.enemyCount; i++) {
       const type = info.types[Math.floor(gameRand() * info.types.length)];
@@ -1742,7 +1767,7 @@ function sectorLabel(sector) {
 const WARP_TIME = 2.6;
 
 function beginWarp(toWave, arriveOnly = false) {
-  const to = sectorForWave(toWave);
+  const to = runSector(toWave);
   run.warp = { t: arriveOnly ? WARP_TIME * 0.5 : 0, toWave, to, swapped: false };
   run.enemyProjectiles = [];
   run.beams = [];
@@ -1856,7 +1881,8 @@ function spawnEnemy(type, scale = 1, diffMul = 1) {
   // HP scales with the wave scale (diffMul for regular enemies, bossScale for bosses)
   const hpScale = scale;
   // Speed scales more gently
-  const speedScale = 1 + (diffMul - 1) * 0.18;
+  let speedScale = 1 + (diffMul - 1) * 0.18;
+  if (hasRule('overdrive') && !isBossType(type)) speedScale *= 1.2;
 
   // Safety: if the edge spawn landed inside an obstacle, nudge it to the nearest edge
   if (run.obstacles && run.obstacles.length > 0 && isInsideObstacle(x, y, def.r)) {
@@ -2057,7 +2083,7 @@ function openShop() {
 
   const grid = document.getElementById('shopGrid');
   grid.innerHTML = '';
-  const next = sectorForWave(run.waveNum + 1);
+  const next = runSector(run.waveNum + 1);
   document.getElementById('shopSubtitle').textContent = `Boss down · Next: ${sectorLabel(next)}`;
   document.getElementById('shopCoresText').textContent = run.cores;
 
@@ -3840,8 +3866,58 @@ function updateSpawning(dt) {
   while (run.spawnQueue.length > 0 && run.spawnTimer >= run.spawnQueue[0].delay) {
     const q = run.spawnQueue.shift();
     run.spawnTimer -= q.delay;
-    spawnEnemy(q.type, q.scale || 1, q.diff || 1);
+    const e = spawnEnemy(q.type, q.scale || 1, q.diff || 1);
+    if (q.twists) applyBossTwists(e, q.twists);
   }
+}
+
+// ---- Weekly challenge boss twists (weekly.js TWISTS) ----
+function applyBossTwists(e, twists) {
+  if (!e || !twists.length) return;
+  e.twists = twists;
+  e.lastHitT = 0;
+  if (twists.includes('fortified')) { e.hp *= 1.5; e.maxHp *= 1.5; }
+  if (twists.includes('overclocked')) { e.aiRate = 1.3; e.baseSpeed *= 1.15; e.fireRate /= 1.3; }
+  if (twists.includes('bulwark')) e.bulwarkT = 5;
+  if (twists.includes('escorted')) e.escortT = 4;
+}
+
+function updateBossTwists(e, dt) {
+  const tw = e.twists;
+  if (tw.includes('bulwark')) {
+    // 2s of shield, 6s open
+    e.bulwarkT -= dt;
+    if (e.bulwarkT <= 0) {
+      e.twistShield = !e.twistShield;
+      e.bulwarkT = e.twistShield ? 2 : 6;
+    }
+  }
+  if (tw.includes('escorted')) {
+    e.escortT -= dt;
+    if (e.escortT <= 0) {
+      e.escortT = 9;
+      const alive = run.enemies.filter((m) => m.owner === e && m.type === 'fighter').length;
+      for (let k = alive; k < Math.min(4, alive + 2); k++) {
+        spawnMinion('fighter', e.x + (k % 2 ? 1 : -1) * e.r * 1.6, e.y + e.r, e);
+      }
+    }
+  }
+  if (tw.includes('regenerating') && e.t - e.lastHitT > 3 && e.hp < e.maxHp) {
+    e.hp = Math.min(e.maxHp, e.hp + e.maxHp * 0.02 * dt);
+  }
+}
+
+function drawTwistShield(e) {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(127, 220, 255, 0.85)';
+  ctx.lineWidth = 3;
+  ctx.setLineDash([10, 6]);
+  ctx.lineDashOffset = -(run.timeElapsed || 0) * 40;
+  ctx.beginPath(); ctx.arc(e.x, e.y, e.r * 1.5, 0, TAU); ctx.stroke();
+  // Multi-part bosses (Binary's stars, Dreadnought's turrets) get a ring per part
+  if (e.parts) for (const pt of e.parts) { ctx.beginPath(); ctx.arc(pt.x, pt.y, pt.r * 1.4, 0, TAU); ctx.stroke(); }
+  ctx.restore();
+  drawGlowSprite(e.x, e.y, e.r * 1.8, '#7fdcff', 0.25);
 }
 
 function updateEnemies(dt) {
@@ -3855,7 +3931,8 @@ function updateEnemies(dt) {
     const dist = Math.hypot(dx, dy) || 1;
     const spd = e.baseSpeed;
 
-    if (updateSpaceEnemy(e, dt, bossApi)) {
+    if (e.twists) updateBossTwists(e, dt);
+    if (updateSpaceEnemy(e, e.aiRate ? dt * e.aiRate : dt, bossApi)) {
       // Sector bosses and their adds run in bosses.js
     } else if (e.ai === 'chase') {
       e.vx = (dx / dist) * spd;
@@ -4366,11 +4443,12 @@ function updateBeams(dt) {
 
 // Damage that respects shields. Returns false if the enemy shrugged it off.
 function damageEnemy(e, amt) {
-  if (e.shielded) {
+  if (e.shielded || e.twistShield) {
     e.shieldHit = 0.15;
     return false;
   }
   e.hp -= amt;
+  e.lastHitT = e.t;
   e.hitFlash = 0.1;
   return true;
 }
@@ -4427,6 +4505,10 @@ function killEnemy(idx) {
   if (isBossKill) playSound('explosion');
   run.enemies.splice(idx, 1);
   if (isBossKill) bossDeath(e);
+  if (isBossKill && e.twists && e.twists.includes('volatile')) {
+    for (let k = 0; k < 18; k++) enemyShoot(e.x, e.y, (k / 18) * TAU, 160, e.color);
+    for (let k = 0; k < 3; k++) spawnMinion('fighter', e.x + Math.cos(k * 2.1) * e.r, e.y + Math.sin(k * 2.1) * e.r, null);
+  }
   run.score += Math.ceil(e.score * run.comboMult);
   addCombo(1);
   spawnExplosion(e.x, e.y, e.color, e.r);
@@ -4572,10 +4654,11 @@ function updatePickups(dt) {
     pk.life -= dt;
     if (pk.life <= 0) { run.pickups.splice(i, 1); continue; }
     if (d < p.r + pk.r) {
-      run.cores++;
+      const gain = hasRule('coreRush') ? 2 : 1;
+      run.cores += gain;
       run.pickups.splice(i, 1);
-      spawnFloat(pk.x, pk.y, '+1', '#ffea00', 10);
-      if (run.passives.pickupHeal > 0 && run.cores % 5 === 0 && run.player.hp < run.player.maxHp) {
+      spawnFloat(pk.x, pk.y, `+${gain}`, '#ffea00', 10);
+      if (run.passives.pickupHeal > 0 && Math.floor(run.cores / 5) > Math.floor((run.cores - gain) / 5) && run.player.hp < run.player.maxHp) {
         run.player.hp = Math.min(run.player.maxHp, run.player.hp + 1);
         spawnFloat(p.x, p.y - 20, '+1 HP', '#39ff14', 14);
       }
@@ -4756,6 +4839,7 @@ function render() {
   // Enemies
   for (const e of run.enemies) {
     drawEnemy(e);
+    if (e.twistShield) drawTwistShield(e);
   }
 
   // Player projectiles
@@ -5836,7 +5920,7 @@ function updateHUD() {
   }
   const tag = document.getElementById('sectorTag');
   if (tag) {
-    const label = run.sector ? sectorLabel(run.sector) : '';
+    const label = run.sector ? (run.challenge ? 'WEEKLY · ' : '') + sectorLabel(run.sector) : '';
     if (tag.textContent !== label) {
       tag.textContent = label;
       if (run.sector) tag.style.color = run.sector.accent;
@@ -5881,6 +5965,21 @@ function togglePause() {
   if (run.paused) pauseBGM(); else resumeBGM();
 }
 
+// "Weekly challenge · rank #3 of 11 pilots" on the death screen
+async function showWeeklyStanding(week, score, result) {
+  const el = document.getElementById('dsWeekly');
+  if (!result.success) {
+    el.textContent = result.reason === 'queued'
+      ? 'Weekly challenge · your rank shows once the score posts'
+      : 'Weekly challenge · score not ranked';
+    return;
+  }
+  const standing = await fetchChallengeStanding(week, score);
+  el.textContent = standing
+    ? `Weekly challenge · rank #${standing.rank} of ${standing.total} pilot${standing.total === 1 ? '' : 's'}`
+    : 'Weekly challenge · rank unavailable';
+}
+
 function gameOver() {
   run.active = false;
   stopBGM();
@@ -5892,6 +5991,11 @@ function gameOver() {
   saveMeta();
 
   // Submit to global leaderboard (fire and forget)
+  const challengeWeek = run.challengeWeek;
+  const finalScore = run.score;
+  const dsWeekly = document.getElementById('dsWeekly');
+  dsWeekly.classList.toggle('hidden', !challengeWeek);
+  dsWeekly.textContent = challengeWeek ? 'Weekly challenge · checking your rank...' : '';
   submitScore({
     wave: run.waveNum,
     score: run.score,
@@ -5906,6 +6010,7 @@ function gameOver() {
     } else if (result.reason === 'queued') {
       toast('Offline: score will post when you reconnect');
     }
+    if (challengeWeek) showWeeklyStanding(challengeWeek, finalScore, result);
   });
 
   hideAll();
@@ -6037,6 +6142,14 @@ function openMeta() {
 // EVENTS
 // ============================================================
 document.getElementById('startBtn').onclick = () => { hideAll(); newRun(); };
+
+// This week's challenge: same seed, route, boss and rules for every pilot
+function startChallengeRun() {
+  newRun({
+    seed: getCurrentChallengeSeed(),
+    challengeWeek: getCurrentChallengeWeek()
+  });
+}
 document.getElementById('metaBtn').onclick = openMeta;
 document.getElementById('shipsBtn').onclick = openShips;
 document.getElementById('closeShipsBtn').onclick = () => { hideAll(); document.getElementById('titleScreen').classList.remove('hidden'); };
@@ -6064,7 +6177,8 @@ document.getElementById('retryBtn').onclick = () => {
     return;
   }
   hideAll();
-  newRun();
+  if (run?.challengeWeek) startChallengeRun();
+  else newRun();
 };
 document.getElementById('deathMetaBtn').onclick = openMeta;
 document.getElementById('deathTitleBtn').onclick = () => {
@@ -6194,6 +6308,8 @@ document.getElementById('abandonBtn').onclick = () => {
     if (!rows || rows.length === 0) {
       const empty = scope === 'friends'
         ? 'No friend scores yet — invite some pilots!'
+        : scope === 'challenge' ? 'Nobody has flown this week\'s challenge yet. Be the first!'
+        : scope === 'lastweek' ? 'Nobody flew last week\'s challenge.'
         : 'No scores yet — be the first!';
       list.innerHTML = `<div class="dim" style="text-align: center; padding: 40px 0;">${empty}</div>`;
       return;
@@ -6216,11 +6332,13 @@ document.getElementById('abandonBtn').onclick = () => {
     const g = document.getElementById('lbScopeGlobal');
     const f = document.getElementById('lbScopeFriends');
     const c = document.getElementById('lbScopeChallenge');
+    const lw = document.getElementById('lbScopeLastWeek');
     const base = 'padding: 4px 14px; font-size: 11px;';
     const active = ' border-color: var(--pink); color: var(--pink);';
     if (g) g.style.cssText = base + (leaderboardScope === 'global' ? active : '');
     if (f) f.style.cssText = base + (leaderboardScope === 'friends' ? active : '');
     if (c) c.style.cssText = base + (leaderboardScope === 'challenge' ? active : '');
+    if (lw) lw.style.cssText = base + (leaderboardScope === 'lastweek' ? active : '');
   }
   async function loadLeaderboard() {
     const list = document.getElementById('leaderboardList');
@@ -6241,11 +6359,20 @@ document.getElementById('abandonBtn').onclick = () => {
       list.innerHTML = '<div class="dim" style="text-align: center; padding: 40px 0;">Sign in to see your friends-only leaderboard.</div>';
       return;
     }
+    // Weekly tabs show the week's best run per pilot, and your best that week
+    const week = leaderboardScope === 'challenge' ? getCurrentChallengeWeek()
+               : leaderboardScope === 'lastweek' ? getPreviousChallengeWeek()
+               : null;
     const fetcher = leaderboardScope === 'friends' ? fetchFriendsLeaderboard
-                  : leaderboardScope === 'challenge' ? () => fetchChallengeLeaderboard(null, 20)
+                  : week ? () => fetchChallengeLeaderboard(week, 20)
                   : fetchLeaderboard;
-    const [rows, myBest] = await Promise.all([fetcher(20), fetchMyBest()]);
-    if (myBest) {
+    const [rows, myBest] = await Promise.all([fetcher(20), fetchMyBest(week)]);
+    if (week) {
+      const label = `Week of ${formatChallengeWeek(week)}`;
+      myBestLine.textContent = myBest
+        ? `${label} · Your best: Wave ${myBest.wave} · Score ${myBest.score.toLocaleString()}`
+        : `${label} · You haven't flown it yet`;
+    } else if (myBest) {
       myBestLine.textContent = `Your best: Wave ${myBest.wave} · Score ${myBest.score.toLocaleString()}`;
     }
     renderLeaderboardRows(rows, list, leaderboardScope);
@@ -6264,6 +6391,8 @@ document.getElementById('abandonBtn').onclick = () => {
   if (lbScopeG) lbScopeG.onclick = () => { leaderboardScope = 'global'; loadLeaderboard(); };
   if (lbScopeF) lbScopeF.onclick = () => { leaderboardScope = 'friends'; loadLeaderboard(); };
   if (lbScopeC) lbScopeC.onclick = () => { leaderboardScope = 'challenge'; loadLeaderboard(); };
+  const lbScopeLW = document.getElementById('lbScopeLastWeek');
+  if (lbScopeLW) lbScopeLW.onclick = () => { leaderboardScope = 'lastweek'; loadLeaderboard(); };
 
   // ----------------------------------------------------------
   // MULTIPLAYER LOBBY WIRING (Phase 8a)
@@ -6534,17 +6663,21 @@ document.getElementById('abandonBtn').onclick = () => {
   const challengeInfo = document.getElementById('weeklyChallengeInfo');
   if (challengeInfo) {
     const week = getCurrentChallengeWeek();
-    const dateLabel = new Date(week).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    challengeInfo.textContent = `Week of ${dateLabel} · Same seed for every pilot`;
+    const ch = weeklyChallenge(week);
+    challengeInfo.textContent = `Week of ${formatChallengeWeek(week)} · ${ch.first.name}`;
+    const boss = ch.featuredTwists.map((t) => TWISTS[t].name).join(' ') + ' ' + ch.featured.toUpperCase();
+    const details = document.getElementById('weeklyChallengeDetails');
+    if (details) {
+      details.innerHTML = `BOSS: <span style="color: var(--cyan);">${escapeHtml(boss)}</span><br>`
+        + 'RULES: ' + ch.rules.map((r) => `<span style="color: var(--yellow);" title="${escapeHtml(RULES[r].desc)}">${escapeHtml(RULES[r].name)}</span>`).join(' · ')
+        + `<br>${ch.rules.map((r) => escapeHtml(RULES[r].desc)).join(' · ')}`;
+    }
   }
   const playChallengeBtn = document.getElementById('playChallengeBtn');
   if (playChallengeBtn) {
     playChallengeBtn.onclick = () => {
       hideAll();
-      newRun({
-        seed: getCurrentChallengeSeed(),
-        challengeWeek: getCurrentChallengeWeek()
-      });
+      startChallengeRun();
     };
   }
   document.getElementById('closeLeaderboardBtn').onclick = () => {

@@ -1,7 +1,7 @@
 // ============================================================
 // SPACE BOSSES: stats and attack patterns
 // ============================================================
-// Twelve sector bosses that join the original five (Obelisk, Hive,
+// Thirteen sector bosses that join the original five (Obelisk, Hive,
 // Sentinel, Prism, Warden). Each one guards a sector in sectors.js.
 //
 // Shared by single player (src/game.js) and the multiplayer server
@@ -36,7 +36,8 @@ export const SPACE_BOSS_DEFS = {
   kraken:      { hp: 60, speed: 60,  r: 36, color: '#7aff6a', score: 380, ai: 'kraken',      fireRate: 2.4 },
   dreadnought: { hp: 65, speed: 40,  r: 50, color: '#ff3860', score: 400, ai: 'dreadnought', fireRate: 0.4 },
   nexus:       { hp: 50, speed: 30,  r: 30, color: '#00f0ff', score: 400, ai: 'nexus',       fireRate: 1.0 },
-  singularity: { hp: 60, speed: 25,  r: 36, color: '#b847ff', score: 420, ai: 'singularity', fireRate: 0.5 }
+  singularity: { hp: 60, speed: 25,  r: 36, color: '#b847ff', score: 420, ai: 'singularity', fireRate: 0.5 },
+  mirage:      { hp: 55, speed: 60,  r: 28, color: '#ff7ad9', score: 420, ai: 'mirage',      fireRate: 1.4 }
 };
 
 // Adds that bosses bring with them.
@@ -63,7 +64,8 @@ export const BOSS_TITLES = {
   kraken: 'Arms of the Nebula',
   dreadnought: 'Flagship of the Fleet',
   nexus: 'The Machine Mind',
-  singularity: 'The End of Light'
+  singularity: 'The End of Light',
+  mirage: 'The Many-Faced Light'
 };
 
 // Multiplayer sends these fields for each boss on top of position and HP,
@@ -82,6 +84,7 @@ export const BOSS_SYNC = {
   dreadnought: ['turret'],
   nexus: [{ key: 'fenceState', enc: ['off', 'warn', 'on'] }, 'shieldHit'],
   singularity: ['spin'],
+  mirage: [{ key: 'mode', enc: ['drift', 'blink'] }, 'modeT', 'fade', 'echo', 'ex1', 'ey1', 'ex2', 'ey2', 'tx', 'ty'],
   fighter: [],
   node: []
 };
@@ -774,6 +777,71 @@ function singularity(e, dt, g) {
 }
 
 // ------------------------------------------------------------
+// MIRAGE: a light-bender that blinks across the arena. Each blink leaves
+// two echoes behind (where it was, and the mirror of where it lands).
+// Echoes fire aimed volleys but can't be hurt and fade after a few
+// seconds; the real Mirage has the white core. Mid-blink it can't be hit.
+// ------------------------------------------------------------
+const BLINK_TIME = 0.55;
+
+function mirage(e, dt, g) {
+  const hp = e.hp / e.maxHp, enraged = hp < 0.5;
+  if (e.mode === undefined) {
+    e.mode = 'drift'; e.modeT = 0; e.fade = 1; e.echo = 0;
+    e.ex1 = e.ey1 = e.ex2 = e.ey2 = 0; e.tx = e.ty = 0;
+  }
+  e.modeT += dt;
+  e.shielded = e.mode === 'blink';
+
+  if (e.mode === 'blink') {
+    e.vx = 0; e.vy = 0;
+    e.fade = Math.max(0, 1 - e.modeT / BLINK_TIME);
+    if (e.modeT < BLINK_TIME) return;
+    e.ex1 = e.x; e.ey1 = e.y;
+    e.ex2 = g.W - e.tx; e.ey2 = e.ty;
+    e.x = e.tx; e.y = e.ty;
+    e.hx = e.tx; e.hy = e.ty;
+    e.echo = 1;
+    e.mode = 'drift'; e.modeT = 0;
+    if (enraged) ring(g, e.x, e.y, 16, 135, '#ff7ad9', g.rand() * TAU);
+    g.shake(4);
+    return;
+  }
+
+  const homeY = Math.max(g.H * 0.3, g.top + e.r * 1.4);
+  hoverTo(e, e.hx ?? g.W / 2, e.hy ?? homeY, 0.9, e.baseSpeed * 3);
+  e.fade = Math.min(1, e.fade + dt * 3);
+  e.echo = Math.max(0, e.echo - dt / (enraged ? 5 : 4));
+  if (!onStage(e, g)) return;
+
+  e.fireCD -= dt;
+  if (e.fireCD <= 0) {
+    e.cycle = (e.cycle || 0) + 1;
+    ring(g, e.x, e.y, enraged ? 14 : 10, 150, '#ff7ad9', e.cycle * 0.35);
+    if (e.echo > 0.15) {
+      for (const [x, y] of [[e.ex1, e.ey1], [e.ex2, e.ey2]]) {
+        fan(g, x, y, Math.atan2(g.p.y - y, g.p.x - x), enraged ? 4 : 3, 0.45, 175, '#b8a4ff', { r: 4 });
+      }
+    }
+    e.fireCD = enraged ? 1.0 : 1.4;
+  }
+
+  if (e.modeT > (enraged ? 3.2 : 4.6)) {
+    // Land somewhere in the top two-thirds, not on top of the pilot
+    const m = e.r * 2;
+    let tx = g.W / 2, ty = homeY;
+    for (let k = 0; k < 8; k++) {
+      tx = m + g.rand() * (g.W - m * 2);
+      ty = Math.max(g.top + e.r, m) + g.rand() * (g.H * 0.66 - m);
+      if (Math.hypot(tx - g.p.x, ty - g.p.y) > 220) break;
+    }
+    e.tx = tx; e.ty = ty;
+    e.mode = 'blink'; e.modeT = 0;
+    g.sound('bosswarn');
+  }
+}
+
+// ------------------------------------------------------------
 // Minions
 // ------------------------------------------------------------
 // Carrier interceptor: swoops in on an S-curve, takes a shot when close.
@@ -801,7 +869,7 @@ function node(e, dt, g) {
   }
 }
 
-const AI = { colossus, glacier, helios, arachne, pulsar, binary, leviathan, carrier, kraken, dreadnought, nexus, singularity, fighter, node };
+const AI = { colossus, glacier, helios, arachne, pulsar, binary, leviathan, carrier, kraken, dreadnought, nexus, singularity, mirage, fighter, node };
 
 // Runs the AI for any boss or minion defined here. Returns false for
 // enemies this module doesn't know, so game.js can fall through.

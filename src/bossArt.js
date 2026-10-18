@@ -876,7 +876,69 @@ function node(ctx, e, t) {
   ctx.restore();
 }
 
-const ART = { colossus, glacier, helios, arachne, pulsar, binary, leviathan, carrier, kraken, dreadnought, nexus, singularity, fighter, node };
+// MIRAGE: a faceted prism of light. Echoes are hollow copies with no white
+// core; a shrinking ring marks where a blink will land.
+function mirageBody(ctx, x, y, r, t, alpha, real) {
+  if (alpha <= 0.01) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(x, y);
+  for (let k = 0; k < 3; k++) {
+    ctx.save();
+    ctx.rotate(t * (0.6 + k * 0.35) * (k % 2 ? -1 : 1) + k);
+    ctx.strokeStyle = rgba(['#ff7ad9', '#b8a4ff', '#7fe8ff'][k], real ? 0.85 : 0.5);
+    ctx.lineWidth = real ? 2 : 1.5;
+    ctx.beginPath();
+    const rr = r * (1.25 - k * 0.2);
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * TAU;
+      ctx[i ? 'lineTo' : 'moveTo'](Math.cos(a) * rr, Math.sin(a) * rr * 0.7);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+  if (real) {
+    ctx.fillStyle = rgba('#ff7ad9', 0.35);
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.7, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  if (real) {
+    glowDot(ctx, x, y, r * 2, '#ff7ad9', alpha * 0.7);
+    glowDot(ctx, x, y, r * 0.55 * (0.85 + 0.15 * Math.sin(t * 9)), '#ffffff', alpha);
+  } else {
+    // glowDot is white at the centre; echoes stay tinted all the way in
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r * 1.4);
+    g.addColorStop(0, rgba('#b8a4ff', 0.35 * alpha));
+    g.addColorStop(1, rgba('#b8a4ff', 0));
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, r * 1.4, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function mirage(ctx, e, t) {
+  const echo = e.echo || 0;
+  if (echo > 0.01) {
+    mirageBody(ctx, e.ex1, e.ey1, e.r, t + 1.3, echo * 0.6, false);
+    mirageBody(ctx, e.ex2, e.ey2, e.r, t + 2.6, echo * 0.6, false);
+  }
+  if (e.mode === 'blink') {
+    const k = Math.min(1, (e.modeT || 0) / 0.55);
+    ctx.save();
+    ctx.strokeStyle = rgba('#ff7ad9', 0.4 + 0.5 * k);
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath(); ctx.arc(e.tx, e.ty, e.r * (3 - 2 * k), 0, TAU); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+  mirageBody(ctx, e.x, e.y, e.r, t, e.fade ?? 1, true);
+}
+
+const ART = { colossus, glacier, helios, arachne, pulsar, binary, leviathan, carrier, kraken, dreadnought, nexus, singularity, mirage, fighter, node };
 
 export function drawSpaceEnemy(ctx, e, t, player) {
   const fn = ART[e.type];

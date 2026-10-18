@@ -152,8 +152,9 @@ export async function fetchLeaderboard(limit = 20) {
 
 // ---- Personal best ----
 // Signed-in: union of scores attributed to user_id OR to this device's anon_id
-// (so pre-signin runs still count). Anon: just this device.
-export async function fetchMyBest() {
+// (so pre-signin runs still count). Anon: just this device. With `week`,
+// only that weekly challenge's runs.
+export async function fetchMyBest(week) {
   if (!online || isOffline()) return null;
   const userId = getSession()?.user?.id;
   const anonId = getAnonId();
@@ -163,6 +164,7 @@ export async function fetchMyBest() {
       .select('wave, score, best_combo')
       .order('score', { ascending: false })
       .limit(1);
+    if (week) query = query.eq('challenge_week', week);
     if (userId) {
       query = query.or(`user_id.eq.${userId},anon_id.eq.${anonId}`);
     } else {

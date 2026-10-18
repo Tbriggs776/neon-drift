@@ -28,19 +28,56 @@ export function getCurrentChallengeSeed() {
   return 'challenge-' + getCurrentChallengeWeek();
 }
 
+export function getPreviousChallengeWeek() {
+  const d = new Date(getCurrentChallengeWeek() + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - 7);
+  return d.toISOString().slice(0, 10);
+}
+
+// "Oct 19" for a YYYY-MM-DD week. Read in UTC: a bare date parses as UTC
+// midnight, which local time zones west of UTC would show as the day before.
+export function formatChallengeWeek(week) {
+  return new Date(week + 'T00:00:00Z').toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+// Every run of the week, best first, kept to each pilot's best (signed-in
+// pilots by account, guests by device).
+async function fetchWeekBests(week) {
+  const { data, error } = await supabase
+    .from('scores')
+    .select('display_name, wave, score, best_combo, created_at, user_id, anon_id')
+    .eq('challenge_week', week)
+    .order('score', { ascending: false })
+    .limit(1000);
+  if (error) return null;
+  const seen = new Set();
+  return (data || []).filter((r) => {
+    const who = r.user_id || r.anon_id || r.display_name || r.created_at;
+    if (seen.has(who)) return false;
+    seen.add(who);
+    return true;
+  });
+}
+
 export async function fetchChallengeLeaderboard(week, limit = 20) {
   if (!online || isOffline()) return [];
-  const targetWeek = week || getCurrentChallengeWeek();
   try {
-    const { data, error } = await supabase
-      .from('scores')
-      .select('display_name, wave, score, best_combo, created_at, user_id')
-      .eq('challenge_week', targetWeek)
-      .order('score', { ascending: false })
-      .limit(limit);
-    if (error) return [];
-    return data || [];
+    const rows = await fetchWeekBests(week || getCurrentChallengeWeek());
+    return rows ? rows.slice(0, limit) : [];
   } catch (e) {
     return [];
+  }
+}
+
+// Where `score` places among the week's pilots: { rank, total }, or null.
+export async function fetchChallengeStanding(week, score) {
+  if (!online || isOffline()) return null;
+  try {
+    const rows = await fetchWeekBests(week);
+    if (!rows) return null;
+    const ahead = rows.filter((r) => r.score > score).length;
+    return { rank: ahead + 1, total: Math.max(rows.length, ahead + 1) };
+  } catch (e) {
+    return null;
   }
 }
