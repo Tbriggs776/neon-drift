@@ -1,5 +1,5 @@
 import './styles.css';
-import { setRandomSeed, gameRand, getCurrentSeed } from './rng.js';
+import { setRandomSeed, gameRand, getCurrentSeed, makeRng } from './rng.js';
 import {
   submitScore,
   fetchLeaderboard,
@@ -73,6 +73,14 @@ import { initMenuNav, navGamepadFrame } from './menuNav.js';
 import { initNative } from './native.js';
 import { SHIPS, PILOT_COLORS, PILOT_COLOR_NAMES, getShip, drawShipModel, shipGuns } from './ships.js';
 import { linkProgress, queueProgressPush, flushProgressPush } from './progressSync.js';
+import { SECTORS, WAVES_PER_SECTOR, sectorForWave, loopSuffix } from './sectors.js';
+import { drawSpaceBackdrop, drawWarp, rgba } from './backdrop.js';
+import {
+  makeRockSprite, drawRock, makePanelSprite, drawPanel,
+  drawMine, drawWell, drawComet, drawFlare, drawStrike, drawPulse, drawGate
+} from './spaceArt.js';
+import { SPACE_BOSS_DEFS, MINION_DEFS, BOSS_TITLES, updateSpaceEnemy, segDist } from './bosses.js';
+import { drawSpaceEnemy, drawBeam } from './bossArt.js';
 
 
 // ============================================================
@@ -350,33 +358,21 @@ function nodeCost(node) {
 // ============================================================
 // Wave structure:
 //   - Every wave: 3-card upgrade pick on clear
-//   - Every 5th wave (5, 10, 15...): MINI-BOSS + shop screen
-//   - Every 25th wave (25, 50, 75...): WARDEN mega-boss (escalating)
-//   - New enemy types unlock at waves 10, 15, 20, 25
-// Sectors (cosmetic theme): 1 per 10 waves
-const SECTORS = [
-  { name: 'THE OUTER GRID',    accent: '#00f0ff', secondary: '#ff2d95' },
-  { name: 'CRIMSON LATTICE',   accent: '#ff2d95', secondary: '#ffea00' },
-  { name: 'VOID SPIRE',        accent: '#b847ff', secondary: '#00f0ff' },
-  { name: 'PULSAR CORE',       accent: '#ffea00', secondary: '#ff2d95' },
-  { name: 'HEATWAVE',          accent: '#ff6b35', secondary: '#b847ff' },
-  { name: 'CRYOGRID',          accent: '#5ac8fa', secondary: '#00f0ff' }
-];
-
+//   - The run drifts through 20 space sectors (sectors.js), 5 waves each.
+//     The 5th wave of a sector is that sector's boss, then the shop, then
+//     a hyperspace jump to the next sector. After sector 20 it loops.
+//   - Every 25th wave (25, 50, 75, 100...): WARDEN mega-boss (escalating)
+//   - New enemy types unlock as waves climb
 const WAVE_NAMES_REGULAR = ['SWARM', 'LATTICE', 'FRACTURE', 'CASCADE', 'BREACH', 'TEMPEST', 'RIPTIDE', 'ECLIPSE', 'VORTEX', 'SURGE'];
-const MINI_BOSSES = ['obelisk', 'hive', 'sentinel', 'prism'];
 
 function getWaveInfo(waveNum) {
   // waveNum is 1-indexed for display purposes
+  const sector = sectorForWave(waveNum);
   const isMegaBoss = waveNum % 25 === 0;
-  const isMiniBoss = waveNum % 5 === 0 && !isMegaBoss;
-  const sectorIndex = Math.min(SECTORS.length - 1, Math.floor((waveNum - 1) / 10));
-  const sector = SECTORS[sectorIndex];
+  const isMiniBoss = sector.waveInSector === WAVES_PER_SECTOR - 1 && !isMegaBoss;
   const loop = Math.floor((waveNum - 1) / 25); // 0, 1, 2...
 
   // Difficulty multiplier: grows smoothly
-  // Wave 1 = 1.0, wave 10 = 2.0, wave 25 = 4.0, wave 50 = 7.0
-  // Difficulty multiplier: slower ramp than before so early waves feel beatable
   // Wave 1 = 1.0, wave 5 = 1.32, wave 10 = 1.72, wave 25 = 3.1, wave 50 = 5.2
   const diffMul = 1 + (waveNum - 1) * 0.08 + Math.pow(Math.max(0, waveNum - 12), 1.15) * 0.02;
 
@@ -389,14 +385,13 @@ function getWaveInfo(waveNum) {
     };
   }
   if (isMiniBoss) {
-    // Rotate mini-boss pool, tougher on later loops
-    const mbIdx = Math.floor((waveNum / 5 - 1)) % MINI_BOSSES.length;
-    const bossType = MINI_BOSSES[mbIdx];
-    const miniLoop = Math.floor((waveNum / 5 - 1) / MINI_BOSSES.length);
+    // Each sector has its own boss; toughness climbs every 25 waves and the
+    // name gains a +N each time the 20-sector rotation comes back around.
+    const bossType = sector.boss;
     return {
       type: 'mini', waveNum, sector, loop, diffMul,
-      name: bossType.toUpperCase() + (miniLoop > 0 ? ` +${miniLoop}` : ''),
-      bossType, bossScale: 1 + miniLoop * 0.35
+      name: bossType.toUpperCase() + (sector.loop > 0 ? ` +${sector.loop}` : ''),
+      bossType, bossScale: 1 + loop * 0.35
     };
   }
   // Regular wave
@@ -409,7 +404,6 @@ function getWaveInfo(waveNum) {
   if (waveNum >= 22) unlockedTypes.push('bomber');
   if (waveNum >= 32) unlockedTypes.push('lancer');
 
-  // Enemy count scales but doesn't spiral
   // Enemy count: gentler early growth so wave 3 isn't 12 enemies
   // Wave 1: 7, wave 3: 9, wave 5: 11, wave 10: 16, capped at 34
   const baseCount = 6 + Math.floor(waveNum * 0.9);
@@ -424,6 +418,20 @@ function getWaveInfo(waveNum) {
 
 let run = null;
 
+// Dev builds only (npm run dev): ?wave=N starts runs at wave N, ?god makes
+// the ship invulnerable. Handy for checking a sector or boss. Never shipped.
+const DEV_PARAMS = import.meta.env.DEV ? new URLSearchParams(location.search) : null;
+const DEV_START_WAVE = DEV_PARAMS && DEV_PARAMS.get('wave') ? Math.max(1, parseInt(DEV_PARAMS.get('wave'), 10) || 1) : 0;
+const DEV_GOD = !!(DEV_PARAMS && DEV_PARAMS.has('god'));
+if (import.meta.env.DEV) {
+  window.__nd = {
+    get run() { return run; },
+    startWave: (n) => startWave(n),
+    beginWarp: (n) => beginWarp(n),
+    killAll: () => { while (run.enemies.length) killEnemy(0); run.spawnQueue = []; }
+  };
+}
+
 // ============================================================
 // Phase 8c: multiplayer run uses server-authoritative simulation.
 // Client just renders server state and forwards input. Single-player
@@ -435,7 +443,8 @@ let run = null;
 function pilotColor(slot) {
   return PILOT_COLORS[(slot || 0) % PILOT_COLORS.length];
 }
-const BOSS_TYPES = ['warden', 'obelisk', 'hive', 'sentinel', 'prism'];
+const BOSS_TYPES = ['warden', 'obelisk', 'hive', 'sentinel', 'prism', ...Object.keys(SPACE_BOSS_DEFS)];
+function isBossType(type) { return BOSS_TYPES.includes(type); }
 
 function newMpRun(options) {
   const runSeed = options.seed || 0;
@@ -839,9 +848,11 @@ function mpRender() {
   const cam = mpCamera();
   const { ww, wh, scale, camX, camY } = cam;
 
-  // Same translucent clear as single player, which leaves short motion trails.
-  ctx.fillStyle = 'rgba(10, 5, 20, 0.35)';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // Same space sky as single player, following the room's wave
+  const now = performance.now() / 1000;
+  const me0 = getMyPlayer();
+  const view = me0 ? { px: (run.player.x - camX) * scale - canvas.width / 2, py: (run.player.y - camY) * scale - canvas.height / 2 } : { px: 0, py: 0 };
+  drawSpaceBackdrop(ctx, canvas.width, canvas.height, sectorForWave(getRoomWaveNum() || 1), now, view, 1 / 60);
 
   ctx.save();
   if (run.screenShake > 0) {
@@ -854,7 +865,6 @@ function mpRender() {
   ctx.translate(-camX * scale, -camY * scale);
   ctx.scale(scale, scale);
 
-  drawGrid(ww, wh);
   // World edge (ships wrap across it)
   ctx.strokeStyle = 'rgba(184, 71, 255, 0.3)';
   ctx.lineWidth = 2;
@@ -1116,7 +1126,7 @@ function drawBossBar(e) {
   ctx.fillStyle = color;
   ctx.shadowColor = color;
   ctx.shadowBlur = 8;
-  ctx.fillText(e.type.toUpperCase(), canvas.width / 2, y - 3);
+  ctx.fillText((e.displayName || e.type).toUpperCase(), canvas.width / 2, y - 3);
   ctx.shadowBlur = 0;
   ctx.fillStyle = 'rgba(10, 5, 20, 0.75)';
   ctx.fillRect(x, y, w, h);
@@ -1436,6 +1446,13 @@ function newRun(options = {}) {
     particles: [],
     pickups: [],
     obstacles: [],
+    hazards: [],          // sector hazards: asteroids, mines, gravity wells, comets, flares...
+    hazardClock: {},      // countdowns for timed hazards (comets, flares, strikes, pulses)
+    beams: [],            // telegraphed boss lasers
+    sector: sectorForWave(1),
+    warp: null,           // hyperspace jump between sectors
+    fxQueue: [],          // delayed explosions (boss death chains)
+    flash: 0,             // white screen flash
     drones: [],           // orbiting drones that shoot alongside you
     turrets: [],          // stationary combat turrets placed on map
     maxTurrets: 0,        // how many combat turrets you can deploy (upgrade gated)
@@ -1470,7 +1487,8 @@ function newRun(options = {}) {
   meta.totalRuns++;
   saveMeta();
   updateHUD();
-  startWave(1);
+  // Arrive out of hyperspace, then wave 1 starts
+  beginWarp(DEV_START_WAVE || 1, true);
   hideAll();
   document.getElementById('hud').classList.remove('hidden');
   document.getElementById('controlsPanel').classList.remove('hidden');
@@ -1489,177 +1507,147 @@ function newRun(options = {}) {
 }
 
 // ============================================================
-// MAPS / OBSTACLE LAYOUTS
-// Each template returns an array of rectangular obstacles {x, y, w, h}
-// sized proportionally to current canvas dimensions.
+// SECTOR MAPS: static cover
 // ============================================================
-const MAP_TEMPLATES = [
-  // OPEN: no obstacles, used for bosses and occasional regular waves
-  {
-    name: 'OPEN',
-    generate: () => []
-  },
-  // FOUR PILLARS: four rectangular pillars in a diamond arrangement
-  {
-    name: 'PILLARS',
-    generate: () => {
-      const cx = W / 2, cy = H / 2;
-      const spread = Math.min(W, H) * 0.28;
-      const pw = Math.min(60, W * 0.08);
-      const ph = Math.min(100, H * 0.14);
-      return [
-        { x: cx - spread - pw / 2, y: cy - ph / 2, w: pw, h: ph },
-        { x: cx + spread - pw / 2, y: cy - ph / 2, w: pw, h: ph },
-        { x: cx - pw / 2, y: cy - spread - ph / 2, w: pw, h: ph },
-        { x: cx - pw / 2, y: cy + spread - ph / 2, w: pw, h: ph }
-      ];
+// Each regular wave lays out the sector's cover (asteroids, ice, crystal
+// clusters, derelict hull plates, station modules) using one of the
+// sector's layouts. Obstacles are circles ({shape:'circle', x, y, r}) or
+// axis-aligned rects ({shape:'rect', x, y, w, h}). Layouts use their own
+// RNG seeded by the run seed and wave, so a seeded run (the weekly
+// challenge) always gets the same maps. Boss waves stay open.
+const TAU = Math.PI * 2;
+const COVER_GAP = 56;      // room left between obstacles so the ship can slip through
+const SPAWN_CLEAR = 130;   // keep the middle and the ship's position clear
+
+const ICE_COLORS = { body: '#9fd8ee', shade: '#2a5a78', rim: '#8ff0ff' };
+const METAL_COLORS = { body: '#4a4e5e', shade: '#16181f', rim: '#ff6b35' };
+
+function waveRng(waveNum, salt) {
+  return makeRng((run.seed ^ Math.imul(waveNum + 1, 2654435761) ^ salt) >>> 0);
+}
+
+function rockColors(sector, kind) {
+  if (kind === 'ice') return sector.rockKind === 'ice' ? sector.rock : ICE_COLORS;
+  if (kind === 'crystal') return sector.rockKind === 'crystal' ? sector.rock : { body: '#6a5aa8', shade: '#1e1638', rim: sector.accent };
+  if (kind === 'metal') return sector.rockKind === 'metal' ? sector.rock : METAL_COLORS;
+  return sector.rock;
+}
+
+// Candidate centers for a layout. Returns more spots than needed; the
+// caller keeps the ones that fit.
+function layoutSpots(layout, n, rand) {
+  const m = Math.min(W, H) * 0.12;
+  const spots = [];
+  const tries = n * 4;
+  if (layout === 'clusters') {
+    const groups = 2 + Math.floor(rand() * 2);
+    const centers = [];
+    for (let g = 0; g < groups; g++) centers.push({ x: m + rand() * (W - m * 2), y: m + rand() * (H - m * 2) });
+    for (let i = 0; i < tries; i++) {
+      const c = centers[i % groups];
+      const a = rand() * TAU, d = 40 + rand() * 90;
+      spots.push({ x: c.x + Math.cos(a) * d, y: c.y + Math.sin(a) * d });
     }
-  },
-  // CORRIDOR: two horizontal walls creating a channel through the middle
-  {
-    name: 'CORRIDOR',
-    generate: () => {
-      const thick = Math.min(40, H * 0.05);
-      const gap = Math.min(180, H * 0.28);
-      const topY = H / 2 - gap / 2 - thick;
-      const botY = H / 2 + gap / 2;
-      const margin = W * 0.12;
-      const wallLen = W * 0.32;
-      return [
-        { x: margin, y: topY, w: wallLen, h: thick },
-        { x: W - margin - wallLen, y: topY, w: wallLen, h: thick },
-        { x: margin, y: botY, w: wallLen, h: thick },
-        { x: W - margin - wallLen, y: botY, w: wallLen, h: thick }
-      ];
+  } else if (layout === 'belt') {
+    // A diagonal band of rock across the arena
+    const flip = rand() < 0.5 ? 1 : -1;
+    for (let i = 0; i < tries; i++) {
+      const t = rand();
+      const x = W * (0.06 + t * 0.88);
+      const y = H * (0.5 + flip * (t - 0.5) * 0.6) + (rand() - 0.5) * 120;
+      spots.push({ x, y });
     }
-  },
-  // CROSS: plus-sign of walls with openings on each side
-  {
-    name: 'CROSS',
-    generate: () => {
-      const cx = W / 2, cy = H / 2;
-      const thick = Math.min(36, W * 0.045);
-      const armLen = Math.min(W, H) * 0.18;
-      return [
-        { x: cx - thick / 2, y: cy - armLen - thick * 1.2, w: thick, h: armLen },
-        { x: cx - thick / 2, y: cy + thick * 1.2, w: thick, h: armLen },
-        { x: cx - armLen - thick * 1.2, y: cy - thick / 2, w: armLen, h: thick },
-        { x: cx + thick * 1.2, y: cy - thick / 2, w: armLen, h: thick }
-      ];
+  } else if (layout === 'ring') {
+    const R = Math.min(W, H) * (0.3 + rand() * 0.06);
+    const off = rand() * TAU;
+    for (let i = 0; i < tries; i++) {
+      const a = off + (i / Math.max(1, n)) * TAU + (rand() - 0.5) * 0.3;
+      spots.push({ x: W / 2 + Math.cos(a) * R * (W > H ? 1.35 : 1), y: H / 2 + Math.sin(a) * R });
     }
-  },
-  // DIAGONALS: two blocks in opposing corners creating a zigzag feel
-  {
-    name: 'DIAGONALS',
-    generate: () => {
-      const bw = Math.min(160, W * 0.2);
-      const bh = Math.min(60, H * 0.08);
-      const margin = Math.min(W, H) * 0.18;
-      return [
-        { x: margin, y: H * 0.28, w: bw, h: bh },
-        { x: W - margin - bw, y: H * 0.28, w: bw, h: bh },
-        { x: W / 2 - bw / 2, y: H * 0.55, w: bw, h: bh },
-        { x: margin * 1.5, y: H * 0.75, w: bw * 0.7, h: bh },
-        { x: W - margin * 1.5 - bw * 0.7, y: H * 0.75, w: bw * 0.7, h: bh }
-      ];
+  } else if (layout === 'lanes') {
+    // Two lines of cover with gaps, across the long side of the screen
+    const wide = W >= H;
+    for (let i = 0; i < tries; i++) {
+      const lane = i % 2;
+      const t = 0.1 + rand() * 0.8;
+      const across = 0.28 + lane * 0.44 + (rand() - 0.5) * 0.06;
+      spots.push(wide ? { x: W * t, y: H * across } : { x: W * across, y: H * t });
     }
-  },
-  // FORTRESS: U-shape in the center, open on one side
-  {
-    name: 'FORTRESS',
-    generate: () => {
-      const cx = W / 2, cy = H / 2;
-      const size = Math.min(W, H) * 0.22;
-      const thick = Math.min(30, W * 0.04);
-      // U open on top
-      return [
-        { x: cx - size, y: cy - size * 0.3, w: thick, h: size * 1.2 }, // left wall
-        { x: cx + size - thick, y: cy - size * 0.3, w: thick, h: size * 1.2 }, // right wall
-        { x: cx - size, y: cy + size * 0.9 - thick, w: size * 2, h: thick } // bottom
-      ];
-    }
-  },
-  // SCATTER: 6 random small blocks
-  {
-    name: 'SCATTER',
-    generate: (seed) => {
-      // Use waveNum as seed for consistency within a run
-      let s = seed || 1;
-      const rng = () => {
-        s = (s * 9301 + 49297) % 233280;
-        return s / 233280;
-      };
-      const blocks = [];
-      const margin = Math.min(W, H) * 0.14;
-      for (let i = 0; i < 6; i++) {
-        const bw = 40 + rng() * 60;
-        const bh = 40 + rng() * 60;
-        const x = margin + rng() * (W - margin * 2 - bw);
-        const y = margin + rng() * (H - margin * 2 - bh);
-        // Avoid spawning too close to center (player spawns there)
-        const cx = x + bw / 2, cy = y + bh / 2;
-        if (Math.hypot(cx - W / 2, cy - H / 2) < 100) continue;
-        blocks.push({ x, y, w: bw, h: bh });
-      }
-      return blocks;
-    }
-  },
-  // GAUNTLET: two vertical columns of blocks creating lanes
-  {
-    name: 'GAUNTLET',
-    generate: () => {
-      const bw = Math.min(50, W * 0.06);
-      const bh = Math.min(70, H * 0.1);
-      const col1x = W * 0.3;
-      const col2x = W * 0.7 - bw;
-      const rows = 3;
-      const gap = (H - rows * bh - H * 0.2) / (rows - 1);
-      const blocks = [];
-      for (let r = 0; r < rows; r++) {
-        const y = H * 0.1 + r * (bh + gap);
-        blocks.push({ x: col1x, y, w: bw, h: bh });
-        blocks.push({ x: col2x, y: y + bh * 0.5, w: bw, h: bh });
-      }
-      return blocks;
-    }
-  },
-  // RING: a hollow rectangular ring in the center
-  {
-    name: 'ARENA RING',
-    generate: () => {
-      const cx = W / 2, cy = H / 2;
-      const outerW = Math.min(W, H) * 0.45;
-      const outerH = Math.min(W, H) * 0.35;
-      const thick = Math.min(26, W * 0.035);
-      // Four walls of a hollow rect
-      return [
-        { x: cx - outerW / 2, y: cy - outerH / 2, w: outerW * 0.35, h: thick },
-        { x: cx + outerW * 0.15, y: cy - outerH / 2, w: outerW * 0.35, h: thick },
-        { x: cx - outerW / 2, y: cy + outerH / 2 - thick, w: outerW * 0.35, h: thick },
-        { x: cx + outerW * 0.15, y: cy + outerH / 2 - thick, w: outerW * 0.35, h: thick },
-        { x: cx - outerW / 2, y: cy - outerH / 2, w: thick, h: outerH * 0.35 },
-        { x: cx - outerW / 2, y: cy + outerH * 0.15, w: thick, h: outerH * 0.35 },
-        { x: cx + outerW / 2 - thick, y: cy - outerH / 2, w: thick, h: outerH * 0.35 },
-        { x: cx + outerW / 2 - thick, y: cy + outerH * 0.15, w: thick, h: outerH * 0.35 }
-      ];
+  } else {
+    for (let i = 0; i < tries; i++) spots.push({ x: m + rand() * (W - m * 2), y: m + rand() * (H - m * 2) });
+  }
+  return spots;
+}
+
+// Space objects shrink on small screens so a phone arena isn't wall to wall
+function spaceScale() {
+  return Math.max(0.6, Math.min(1, Math.min(W, H) / 720));
+}
+
+function makeCover(kind, x, y, rand, sector) {
+  const k = spaceScale();
+  if (kind === 'wreck' || kind === 'station') {
+    const long = ((kind === 'station' ? 100 : 90) + rand() * 80) * k;
+    const short = ((kind === 'station' ? 34 : 28) + rand() * 14) * Math.max(0.8, k);
+    const horiz = rand() < 0.6;
+    const w = horiz ? long : short, h = horiz ? short : long;
+    const o = { shape: 'rect', kind, x: x - w / 2, y: y - h / 2, w, h };
+    o.sprite = makePanelSprite(w, h, kind, rockColors(sector, 'metal'), Math.floor(rand() * 1e9));
+    return o;
+  }
+  // Cover rocks run bigger than the drifting ones (max 34) and carry veins
+  const r = ((kind === 'crystal' ? 30 : 38) + rand() * 26) * k;
+  const spriteKind = kind === 'asteroid' ? 'stone' : kind;
+  return {
+    shape: 'circle', kind, x, y,
+    r: r * 0.9,
+    rot: rand() * TAU,
+    spin: (rand() - 0.5) * 0.12,
+    sprite: makeRockSprite(r, spriteKind, rockColors(sector, kind), Math.floor(rand() * 1e9), spriteKind !== 'crystal')
+  };
+}
+
+// Does a new obstacle leave enough room around the others and the ship?
+function coverFits(o, placed, avoid) {
+  const margin = 24;
+  if (o.shape === 'circle') {
+    if (o.x - o.r < margin || o.x + o.r > W - margin || o.y - o.r < margin || o.y + o.r > H - margin) return false;
+  } else if (o.x < margin || o.x + o.w > W - margin || o.y < margin || o.y + o.h > H - margin) return false;
+  for (const a of avoid) {
+    if (obstacleOverlap(a.x, a.y, SPAWN_CLEAR, o)) return false;
+  }
+  for (const p of placed) {
+    if (o.shape === 'circle' && obstacleOverlap(o.x, o.y, o.r + COVER_GAP, p)) return false;
+    if (o.shape === 'rect') {
+      if (p.shape === 'circle' && circleRectOverlap(p.x, p.y, p.r + COVER_GAP, o)) return false;
+      if (p.shape === 'rect' && o.x < p.x + p.w + COVER_GAP && o.x + o.w + COVER_GAP > p.x &&
+          o.y < p.y + p.h + COVER_GAP && o.y + o.h + COVER_GAP > p.y) return false;
     }
   }
-];
+  return true;
+}
 
 function generateObstaclesForWave(waveNum, waveInfo) {
   // Boss waves: always open, player needs room
-  if (waveInfo && (waveInfo.type === 'mega' || waveInfo.type === 'mini')) {
-    return [];
-  }
+  if (waveInfo && (waveInfo.type === 'mega' || waveInfo.type === 'mini')) return [];
   // Wave 1: always open so new players get comfortable
   if (waveNum === 1) return [];
-  // Wave 2: occasionally still open
-  if (waveNum === 2 && gameRand() < 0.5) return [];
-  // Pick template based on wave number (rotates through pool, skipping OPEN for non-boss waves)
-  const nonOpenTemplates = MAP_TEMPLATES.filter(t => t.name !== 'OPEN');
-  const idx = (waveNum - 1) % nonOpenTemplates.length;
-  const template = nonOpenTemplates[idx];
-  return template.generate(waveNum * 37 + 1);
+  const sector = waveInfo.sector;
+  const cover = sector.cover;
+  const rand = waveRng(waveNum, 0xc0fe);
+  const [lo, hi] = cover.count;
+  const want = lo + Math.floor(rand() * (hi - lo + 1)) + Math.min(2, sector.loop);
+  const layout = cover.layouts[(sector.waveInSector + Math.floor(rand() * 2)) % cover.layouts.length];
+  const avoid = [{ x: W / 2, y: H / 2 }];
+  if (run.player) avoid.push({ x: run.player.x, y: run.player.y });
+  const placed = [];
+  for (const spot of layoutSpots(layout, want, rand)) {
+    if (placed.length >= want) break;
+    const kind = cover.kinds[Math.floor(rand() * cover.kinds.length)];
+    const o = makeCover(kind, spot.x, spot.y, rand, sector);
+    if (coverFits(o, placed, avoid)) placed.push(o);
+  }
+  return placed;
 }
 
 function startWave(waveNum) {
@@ -1667,9 +1655,12 @@ function startWave(waveNum) {
   run.waveCleared = false;
   const info = getWaveInfo(waveNum);
   run.currentWaveInfo = info;
+  run.sector = info.sector;
+  run.beams = [];
 
-  // Generate obstacles for this wave
+  // Generate obstacles and hazards for this wave
   run.obstacles = generateObstaclesForWave(waveNum, info);
+  setupHazards(waveNum, info);
 
   // If player is inside an obstacle (can happen on resize or wave change),
   // nudge them to the nearest open space
@@ -1697,7 +1688,6 @@ function startWave(waveNum) {
     }
   }
 
-
   run.spawnQueue = [];
   if (info.type === 'mega' || info.type === 'mini') {
     playSound('bosswarn');
@@ -1705,7 +1695,6 @@ function startWave(waveNum) {
   } else {
     for (let i = 0; i < info.enemyCount; i++) {
       const type = info.types[Math.floor(gameRand() * info.types.length)];
-      // Spawn cadence tightens with difficulty
       // Spawn cadence tightens with difficulty but never too fast
       const baseDelay = Math.max(0.18, 0.65 - info.diffMul * 0.02);
       const jitter = 0.4 - Math.min(0.22, info.diffMul * 0.01);
@@ -1719,28 +1708,96 @@ function startWave(waveNum) {
   }
   run.spawnTimer = 0;
 
-  announceWave(waveNum, info.type, info.name);
+  let sub = '';
+  if (info.type !== 'regular') sub = BOSS_TITLES[info.bossType] || '';
+  else if (info.sector.waveInSector === 0) sub = sectorLabel(info.sector);
+  announceWave(waveNum, info.type, info.name, sub);
+}
 
-  // Sector transition toast at each 10-wave mark
-  if (waveNum === 1 || (waveNum - 1) % 10 === 0) {
-    toast(`Sector: ${info.sector.name}`);
+// "SECTOR 03 · CRIMSON NEBULA" (sector numbers keep climbing past 20)
+function sectorLabel(sector) {
+  return `SECTOR ${String(sector.number).padStart(2, '0')} · ${sector.name}${loopSuffix(sector.loop)}`;
+}
+
+// ============================================================
+// HYPERSPACE JUMP between sectors
+// ============================================================
+// After a boss's shop, the ship jumps: stars stretch, the screen flashes,
+// the new sector's sky fades in, then its first wave starts. A new run
+// arrives the same way (arriveOnly skips the departure half).
+const WARP_TIME = 2.6;
+
+function beginWarp(toWave, arriveOnly = false) {
+  const to = sectorForWave(toWave);
+  run.warp = { t: arriveOnly ? WARP_TIME * 0.5 : 0, toWave, to, swapped: false };
+  run.enemyProjectiles = [];
+  run.beams = [];
+  if (arriveOnly) swapSector();
+  showSectorCard(to, WARP_TIME - run.warp.t);
+}
+
+function swapSector() {
+  const w = run.warp;
+  w.swapped = true;
+  run.sector = w.to;
+  run.hazards = [];
+  run.obstacles = [];
+  run.pickups = [];
+  run.turrets = [];
+  run.medics = [];
+  run.snakeTurrets = [];
+  run.snakes = [];
+  run.particles = [];
+  const p = run.player;
+  p.x = W / 2; p.y = H / 2;
+  p.lastX = p.x; p.lastY = p.y;
+  p.trail = [];
+}
+
+function updateWarp(dt) {
+  const w = run.warp;
+  w.t += dt;
+  if (!w.swapped && w.t >= WARP_TIME * 0.5) swapSector();
+  if (w.t >= WARP_TIME) {
+    run.warp = null;
+    startWave(w.toWave);
   }
 }
 
+// Sector title card that plays over the jump and is gone when the wave starts
+function showSectorCard(sector, duration) {
+  const el = document.getElementById('sectorCard');
+  if (!el) return;
+  document.getElementById('sectorCardNum').textContent = `SECTOR ${String(sector.number).padStart(2, '0')}`;
+  document.getElementById('sectorCardName').textContent = sector.name + loopSuffix(sector.loop);
+  document.getElementById('sectorCardTag').textContent = sector.tagline;
+  el.style.setProperty('--sector-accent', sector.accent);
+  el.style.animationDuration = `${duration}s`;
+  el.classList.remove('show');
+  void el.offsetWidth;
+  el.classList.add('show');
+  clearTimeout(showSectorCard.timer);
+  showSectorCard.timer = setTimeout(() => el.classList.remove('show'), duration * 1000);
+}
+
 // Big "WAVE 07 · SWARM" banner. kind is 'regular', 'mini' or 'mega'.
-function announceWave(waveNum, kind, name) {
+// sub is an optional line under the name (boss title or sector).
+function announceWave(waveNum, kind, name, sub = '') {
   const ann = document.getElementById('waveAnnouncer');
   document.getElementById('waveAnnounceNum').textContent = waveNum.toString().padStart(2, '0');
   let label = 'WAVE';
   if (kind === 'mega') label = 'MEGA BOSS';
-  else if (kind === 'mini') label = 'MINI BOSS';
+  else if (kind === 'mini') label = 'SECTOR BOSS';
   const labelEl = ann.querySelector('.wave-label');
   if (labelEl) labelEl.textContent = label;
   document.getElementById('waveAnnounceName').textContent = name;
+  const subEl = document.getElementById('waveAnnounceSub');
+  if (subEl) subEl.textContent = sub;
   ann.classList.remove('show');
   void ann.offsetWidth;
   ann.classList.add('show');
-  setTimeout(() => ann.classList.remove('show'), 2000);
+  clearTimeout(announceWave.timer);
+  announceWave.timer = setTimeout(() => ann.classList.remove('show'), kind === 'regular' ? 2000 : 2800);
 }
 
 // ============================================================
@@ -1761,12 +1818,15 @@ const ENEMY_DEFS = {
   sentinel: { hp: 50, speed: 90,  r: 26, color: '#ffea00', score: 280, ai: 'sentinel',fireRate: 1.0 },
   prism:    { hp: 45, speed: 100, r: 28, color: '#5ac8fa', score: 300, ai: 'prism',   fireRate: 0.9 },
   // Mega
-  warden:   { hp: 70, speed: 60,  r: 42, color: '#ff3860', score: 750, ai: 'warden',  fireRate: 0.5 }
+  warden:   { hp: 70, speed: 60,  r: 42, color: '#ff3860', score: 750, ai: 'warden',  fireRate: 0.5 },
+  // Sector bosses and their adds (bosses.js)
+  ...SPACE_BOSS_DEFS,
+  ...MINION_DEFS
 };
 
 function spawnEnemy(type, scale = 1, diffMul = 1) {
   const def = ENEMY_DEFS[type];
-  if (!def) return;
+  if (!def) return null;
   // Spawn at random edge
   const side = Math.floor(gameRand() * 4);
   let x, y;
@@ -1775,15 +1835,12 @@ function spawnEnemy(type, scale = 1, diffMul = 1) {
   else if (side === 2) { x = gameRand() * W; y = H + 30; }
   else { x = -30; y = gameRand() * H; }
   // Bosses spawn top center
-  if (def.ai === 'warden' || def.ai === 'obelisk' || def.ai === 'hive' ||
-      def.ai === 'sentinel' || def.ai === 'prism') {
+  if (isBossType(type)) {
     x = W / 2; y = -80;
   }
 
-  // HP scales with both wave scale AND diffMul (for regular enemies only)
-  const hpScale = def.ai.includes('warden') || ['obelisk','hive','sentinel','prism'].includes(def.ai)
-    ? scale
-    : scale;
+  // HP scales with the wave scale (diffMul for regular enemies, bossScale for bosses)
+  const hpScale = scale;
   // Speed scales more gently
   const speedScale = 1 + (diffMul - 1) * 0.18;
 
@@ -1798,7 +1855,7 @@ function spawnEnemy(type, scale = 1, diffMul = 1) {
     else x = -30;
   }
 
-  run.enemies.push({
+  const enemy = {
     type,
     x, y,
     vx: 0, vy: 0,
@@ -1814,12 +1871,51 @@ function spawnEnemy(type, scale = 1, diffMul = 1) {
     angle: 0,
     t: 0,
     phase: 0,
+    seed: gameRand() * 10,
     // Behavioral state
     splitLeft: type === 'splitter' ? 2 : 0,  // splits into 2 mini-grunts on death
     phantomCycle: 0,                         // phantoms fade in/out
     lancerCharge: 0
-  });
+  };
+  if (isBossType(type) && run.currentWaveInfo) enemy.displayName = run.currentWaveInfo.name;
+  run.enemies.push(enemy);
+  return enemy;
 }
+
+// An add brought in by a boss (hive grunts, carrier fighters, nexus nodes).
+// Owned adds die with their boss.
+function spawnMinion(type, x, y, owner) {
+  const info = run.currentWaveInfo;
+  const diff = info ? info.diffMul : 1;
+  const scale = type === 'node' ? (info?.bossScale || 1) * (1 + (diff - 1) * 0.25) : Math.max(0.5, diff * 0.5);
+  const m = spawnEnemy(type, scale, diff * 0.6);
+  if (!m) return null;
+  m.x = x; m.y = y;
+  m.owner = owner || null;
+  m.minion = true;
+  return m;
+}
+
+// What bosses.js can reach (see the header comment there).
+const bossApi = {
+  get W() { return W; },
+  get H() { return H; },
+  get p() { return run.player; },
+  get diff() { return run.currentWaveInfo ? run.currentWaveInfo.diffMul : 1; },
+  get top() { return hudBottom() + 34; },   // clear of the HUD and boss bar
+  rand: gameRand,
+  shoot: (x, y, a, speed, color, opts) => enemyShoot(x, y, a, speed, color, opts),
+  beam: (owner, opts) => addBeam(owner, opts),
+  minion: spawnMinion,
+  hazard: (kind, props) => spawnHazard(kind, props),
+  hazards: () => run.hazards,
+  alive: (e) => !!e && !e.dead,
+  pull: (x, y, strength, reach, dt) => pullPlayer(x, y, strength, reach, dt),
+  hurt: () => damagePlayer(1),
+  explode: (x, y, color, size) => spawnExplosion(x, y, color, size),
+  shake: (n) => { run.screenShake = Math.max(run.screenShake, n); },
+  sound: playSound
+};
 
 // ============================================================
 // UPGRADE POOL (roguelike drops)
@@ -1948,7 +2044,8 @@ function openShop() {
 
   const grid = document.getElementById('shopGrid');
   grid.innerHTML = '';
-  document.getElementById('shopSubtitle').textContent = `Wave ${run.waveNum} boss cleared · Spend cores`;
+  const next = sectorForWave(run.waveNum + 1);
+  document.getElementById('shopSubtitle').textContent = `Boss down · Next: ${sectorLabel(next)}`;
   document.getElementById('shopCoresText').textContent = run.cores;
 
   for (const item of picks) {
@@ -2596,11 +2693,21 @@ requestAnimationFrame(loop);
 
 function update(dt) {
   run.timeElapsed += dt;
+  if (run.warp) {
+    // Hyperspace: nothing to fight, just the jump
+    updateWarp(dt);
+    tickShipCosmetics(run.player, dt);
+    updateParticles(dt);
+    updateFx(dt);
+    return;
+  }
   updatePlayer(dt);
   updateSpawning(dt);
   updateEnemies(dt);
   updateProjectiles(dt);
   updateEnemyProjectiles(dt);
+  updateBeams(dt);
+  updateHazards(dt);
   updateDrones(dt);
   updateTurrets(dt);
   updateMedics(dt);
@@ -2611,6 +2718,7 @@ function update(dt) {
   updatePickups(dt);
   updateCombo(dt);
   updateCooldowns(dt);
+  updateFx(dt);
   checkWaveClear();
   if (run.screenShake > 0) run.screenShake = Math.max(0, run.screenShake - dt * 30);
 }
@@ -3305,8 +3413,8 @@ function updateSnakes(dt) {
     // Bite any enemy we touch (once per enemy, limited total bites)
     for (const e of run.enemies) {
       if (e.intangible || s.hitIds.has(e)) continue;
-      if (circleHit(s.x, s.y, 7, e.x, e.y, e.r)) {
-        e.hp -= s.damage;
+      if (enemyHitTest(e, s.x, s.y, 7)) {
+        damageEnemy(e, s.damage);
         s.hitIds.add(e);
         s.hitCount++;
         spawnHitParticles(s.x, s.y, '#bc8cff');
@@ -3565,7 +3673,7 @@ function nukeScreen() {
   // Damage all enemies on screen
   for (let i = run.enemies.length - 1; i >= 0; i--) {
     const e = run.enemies[i];
-    e.hp -= 100;
+    if (!e || !damageEnemy(e, 100)) continue;
     if (e.hp <= 0) killEnemy(i);
   }
   // Clear all enemy projectiles
@@ -3590,6 +3698,466 @@ function nukeScreen() {
   }
 }
 
+// ============================================================
+// SPACE HAZARDS
+// ============================================================
+// Each sector brings its own trouble (see sectors.js `hazards`):
+//   rock    drifting asteroids that wrap around the screen. Shoot them and
+//           they split (big → medium → small), Asteroids style. They hurt
+//           on contact and soak up enemy fire.
+//   mine    proximity mines: arm when you get close, blow after a short
+//           fuse. Shoot one to set it off early; blasts hurt enemies too
+//           and chain into nearby mines.
+//   well    gravity wells: pull your ship and bend every bullet nearby.
+//           The core hurts.
+//   gate    laser fences between two pylons, cycling off / flicker / on.
+//   comet   streaks across the arena after a warning at the edge.
+//   flare   solar flare: a lane flashes a warning, then burns.
+//   strike  ion storm lightning: a marked circle, then a bolt.
+//   pulse   shock rings rolling out from a point. Dash through them.
+// Counts (rocks, mines, wells, gates) are placed when the wave starts.
+// The rest arrive on timers (every N seconds) until the wave is clear.
+const HAZARD_TIMED = ['comets', 'flares', 'strikes', 'pulses'];
+const ROCK_TIERS = {
+  3: { r: 34, hp: 5, score: 15 },
+  2: { r: 20, hp: 3, score: 10 },
+  1: { r: 11, hp: 1, score: 5 }
+};
+const rockSpriteCache = new Map();
+
+function rockRadius(tier) {
+  return Math.round(ROCK_TIERS[tier].r * (0.75 + spaceScale() * 0.25));
+}
+
+function rockSprite(sector, kind, tier, variant) {
+  const r = rockRadius(tier);
+  const key = `${sector.index}:${kind}:${r}:${variant}`;
+  let s = rockSpriteCache.get(key);
+  if (!s) {
+    const colors = rockColors(sector, kind === 'stone' ? 'asteroid' : kind);
+    s = makeRockSprite(r * 1.08, kind, colors, sector.index * 1000 + tier * 100 + variant * 7 + kind.length);
+    rockSpriteCache.set(key, s);
+  }
+  return s;
+}
+
+function setupHazards(waveNum, info) {
+  run.hazards = [];
+  run.hazardClock = {};
+  run.wells = null;
+  const sector = info.sector;
+  const boss = info.type !== 'regular';
+  const cfg = waveNum === 1 ? {} : boss ? (sector.bossHazards || {}) : (sector.hazards || {});
+  const rand = waveRng(waveNum, 0x4a2a);
+  run.hazardRand = rand;
+  // A little more trouble deeper into a sector, and on every lap of the 20
+  const ramp = (1 + sector.waveInSector * 0.12 + sector.loop * 0.35) * (waveNum === 2 ? 0.6 : 1);
+  run.hazardRamp = ramp;
+  // Phones get fewer rocks and mines than a desktop-sized arena
+  const area = Math.max(0.45, Math.min(1.3, (W * H) / (1280 * 720)));
+  const count = (n) => (n ? Math.max(1, Math.round(n * ramp * area)) : 0);
+  const p = run.player;
+  const farFromShip = (x, y, d) => Math.hypot(x - p.x, y - p.y) > d && Math.hypot(x - W / 2, y - H / 2) > d * 0.6;
+  const openSpot = (d, r) => {
+    for (let k = 0; k < 30; k++) {
+      const x = r + rand() * (W - r * 2), y = r + rand() * (H - r * 2);
+      if (farFromShip(x, y, d) && !isInsideObstacle(x, y, r + 20)) return { x, y };
+    }
+    return null;
+  };
+
+  for (let k = 0; k < count(cfg.rocks); k++) {
+    const at = openSpot(230, 40);
+    if (!at) continue;
+    const a = rand() * TAU, sp = 25 + rand() * 45;
+    spawnHazard('rock', { x: at.x, y: at.y, tier: rand() < 0.7 ? 3 : 2, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, variant: Math.floor(rand() * 4) });
+  }
+  for (let k = 0; k < count(cfg.mines); k++) {
+    const at = openSpot(170, 30);
+    if (at) spawnHazard('mine', at);
+  }
+  for (let k = 0; k < (cfg.wells || 0) + (cfg.wells ? Math.min(1, sector.loop) : 0); k++) {
+    const at = openSpot(260, 60);
+    if (at) spawnHazard('well', at);
+  }
+  for (let k = 0; k < (cfg.gates || 0); k++) {
+    for (let tries = 0; tries < 20; tries++) {
+      const len = 170 + rand() * 150;
+      const a = rand() * Math.PI;
+      const cx = W * (0.2 + rand() * 0.6), cy = H * (0.2 + rand() * 0.6);
+      const x1 = cx - Math.cos(a) * len / 2, y1 = cy - Math.sin(a) * len / 2;
+      const x2 = cx + Math.cos(a) * len / 2, y2 = cy + Math.sin(a) * len / 2;
+      const inside = (x, y) => x > 30 && x < W - 30 && y > 30 && y < H - 30;
+      if (!inside(x1, y1) || !inside(x2, y2)) continue;
+      if (isInsideObstacle(x1, y1, 40) || isInsideObstacle(x2, y2, 40)) continue;
+      if (segDist(p.x, p.y, x1, y1, x2, y2) < 110 || segDist(W / 2, H / 2, x1, y1, x2, y2) < 90) continue;
+      spawnHazard('gate', { x1, y1, x2, y2, offset: rand() * 5 });
+      break;
+    }
+  }
+  for (const kind of HAZARD_TIMED) {
+    if (cfg[kind]) {
+      const every = cfg[kind] / Math.sqrt(ramp);
+      run.hazardClock[kind] = { every, left: 2.5 + rand() * every * 0.6 };
+    }
+  }
+}
+
+// Make a hazard. Bosses call this too (Colossus calves rocks, Arachne lays
+// mines, Helios throws flares, Singularity opens wells).
+function spawnHazard(kind, props = {}) {
+  const sector = run.sector;
+  const diff = run.currentWaveInfo ? run.currentWaveInfo.diffMul : 1;
+  let h = null;
+  if (kind === 'rock') {
+    const tier = props.tier || 3;
+    const t = ROCK_TIERS[tier];
+    const rk = sector.rockKind || 'stone';
+    const variant = props.variant ?? Math.floor(Math.random() * 4);
+    h = {
+      kind, tier, x: props.x, y: props.y, vx: props.vx || 0, vy: props.vy || 0,
+      r: rockRadius(tier) * 0.92, hp: t.hp * (1 + (diff - 1) * 0.2), rot: Math.random() * TAU,
+      spin: (Math.random() - 0.5) * (4 - tier) * 0.6, rockKind: rk, variant,
+      sprite: rockSprite(sector, rk, tier, variant), hitFlash: 0, owner: props.owner || null
+    };
+  } else if (kind === 'mine') {
+    const a = Math.random() * TAU;
+    h = {
+      kind, x: props.x, y: props.y, vx: Math.cos(a) * 8, vy: Math.sin(a) * 8,
+      r: 11, trigger: 72, blast: 88, fuse: 0, fuseMax: 0.7, hp: 1, seed: Math.random() * 10,
+      owner: props.owner || null
+    };
+  } else if (kind === 'well') {
+    h = {
+      kind, x: props.x, y: props.y, core: props.core || 16, reach: props.reach || 240,
+      strength: props.strength || 135, seed: Math.random() * 10, life: props.life || 0,
+      color: '#b847ff', disk: sector.secondary || '#ff9f43',
+      owner: props.owner || null
+    };
+  } else if (kind === 'gate') {
+    const pylonR = 12;
+    h = {
+      kind, x1: props.x1, y1: props.y1, x2: props.x2, y2: props.y2, x: (props.x1 + props.x2) / 2, y: (props.y1 + props.y2) / 2,
+      pylonR, width: 7, t: props.offset || 0, offTime: 2.4, warnTime: 0.7, onTime: 2.2, state: 'off',
+      color: sector.accent
+    };
+    run.obstacles.push({ shape: 'circle', kind: 'pylon', x: props.x1, y: props.y1, r: pylonR, noDraw: true });
+    run.obstacles.push({ shape: 'circle', kind: 'pylon', x: props.x2, y: props.y2, r: pylonR, noDraw: true });
+  } else if (kind === 'comet') {
+    // Enter from a random edge, aimed through the middle of the arena
+    const side = Math.floor(Math.random() * 4);
+    const m = 60;
+    let x, y;
+    if (side === 0) { x = Math.random() * W; y = -m; }
+    else if (side === 1) { x = W + m; y = Math.random() * H; }
+    else if (side === 2) { x = Math.random() * W; y = H + m; }
+    else { x = -m; y = Math.random() * H; }
+    const tx = W * (0.25 + Math.random() * 0.5), ty = H * (0.25 + Math.random() * 0.5);
+    const a = Math.atan2(ty - y, tx - x), sp = 560 + Math.random() * 120;
+    h = {
+      kind, x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, r: 14, warn: 1.3,
+      markX: Math.max(18, Math.min(W - 18, x)), markY: Math.max(18, Math.min(H - 18, y))
+    };
+  } else if (kind === 'flare') {
+    const axis = props.axis || (Math.random() < 0.5 ? 'x' : 'y');
+    const p = run.player;
+    const pos = props.pos ?? (Math.random() < 0.5 ? (axis === 'x' ? p.x : p.y) : (axis === 'x' ? W : H) * (0.15 + Math.random() * 0.7));
+    h = { kind, axis, pos, half: 36 + Math.random() * 16, warn: 1.6, warnMax: 1.6, burn: 0.55, burnMax: 0.55, hit: false, owner: props.owner || null };
+  } else if (kind === 'strike') {
+    const p = run.player;
+    h = {
+      kind, x: Math.max(30, Math.min(W - 30, p.x + (Math.random() - 0.5) * 240)),
+      y: Math.max(30, Math.min(H - 30, p.y + (Math.random() - 0.5) * 240)),
+      r: 46, warn: 1.1, warnMax: 1.1, burn: 0.25, burnMax: 0.25, struck: false, boltSeed: Math.random()
+    };
+  } else if (kind === 'pulse') {
+    let x = W / 2, y = H / 2;
+    for (let k = 0; k < 10; k++) {
+      x = W * (0.1 + Math.random() * 0.8); y = H * (0.1 + Math.random() * 0.8);
+      if (Math.hypot(x - run.player.x, y - run.player.y) > 220) break;
+    }
+    h = { kind, x, y, warn: 1.0, warnMax: 1.0, radius: 0, speed: 240, maxRadius: Math.hypot(W, H), thick: 7, hit: false, color: sector.accent };
+  }
+  if (h) run.hazards.push(h);
+  return h;
+}
+
+// Gravity on the player from a well or the Singularity
+function pullPlayer(x, y, strength, reach, dt) {
+  const p = run.player;
+  const dx = x - p.x, dy = y - p.y;
+  const d = Math.hypot(dx, dy);
+  if (d > reach || d < 1) return;
+  const f = strength * Math.max(0.3, 1 - d / reach);
+  const res = resolveCircleMove(p.x, p.y, p.x + (dx / d) * f * dt, p.y + (dy / d) * f * dt, p.r);
+  p.x = res.x;
+  p.y = res.y;
+}
+
+// Bend a bullet toward any gravity well in reach. True if it got swallowed.
+function applyWellGravity(b, dt) {
+  for (const w of run.wells) {
+    const dx = w.x - b.x, dy = w.y - b.y;
+    const d = Math.hypot(dx, dy);
+    if (d < w.core) return true;
+    if (d > w.reach) continue;
+    const f = w.strength * 7 * (1 - d / w.reach);
+    b.vx += (dx / d) * f * dt;
+    b.vy += (dy / d) * f * dt;
+  }
+  return false;
+}
+
+function removeHazard(h) {
+  const i = run.hazards.indexOf(h);
+  if (i >= 0) run.hazards.splice(i, 1);
+}
+
+function hazardHitByShot(pr) {
+  for (const h of run.hazards) {
+    if ((h.kind !== 'rock' && h.kind !== 'mine') || pr.hitIds.has(h)) continue;
+    if (circleHit(pr.x, pr.y, pr.r, h.x, h.y, h.r)) return h;
+  }
+  return null;
+}
+
+function hazardBlocksShot(b) {
+  if (b.orbit) return false;
+  for (const h of run.hazards) {
+    if (h.kind === 'rock' && circleHit(b.x, b.y, b.r, h.x, h.y, h.r)) return true;
+  }
+  return false;
+}
+
+function damageHazard(h, amt) {
+  if (h.kind === 'mine') { explodeMine(h); return; }
+  if (h.kind !== 'rock') return;
+  h.hp -= amt;
+  h.hitFlash = 0.1;
+  if (h.hp <= 0) shatterRock(h, true);
+}
+
+// Split a rock into two smaller ones (or dust if it was small).
+function shatterRock(h, byPlayer) {
+  const idx = run.hazards.indexOf(h);
+  if (idx < 0) return;
+  run.hazards.splice(idx, 1);
+  const rim = rockColors(run.sector, h.rockKind === 'stone' ? 'asteroid' : h.rockKind).rim;
+  spawnRockDebris(h.x, h.y, h.r, rim);
+  if (byPlayer) {
+    const pts = ROCK_TIERS[h.tier].score;
+    run.score += pts;
+    spawnFloat(h.x, h.y - h.r, `+${pts}`, rim, 12);
+    if (h.tier === 1 && gameRand() < 0.3) {
+      run.pickups.push({ x: h.x, y: h.y, vx: 0, vy: 0, r: 6, life: 10, type: 'core' });
+    }
+  }
+  if (h.tier > 1) {
+    const base = Math.atan2(h.vy, h.vx) + Math.PI / 2;
+    const sp = Math.hypot(h.vx, h.vy) * 1.3 + 40;
+    for (const s of [-1, 1]) {
+      const a = base + (s > 0 ? 0 : Math.PI) + (Math.random() - 0.5) * 0.6;
+      spawnHazard('rock', {
+        x: h.x + Math.cos(a) * h.r * 0.4, y: h.y + Math.sin(a) * h.r * 0.4,
+        tier: h.tier - 1, vx: Math.cos(a) * sp + h.vx * 0.5, vy: Math.sin(a) * sp + h.vy * 0.5, variant: h.variant
+      });
+    }
+  }
+}
+
+function explodeMine(m) {
+  const idx = run.hazards.indexOf(m);
+  if (idx < 0) return;
+  run.hazards.splice(idx, 1);
+  spawnExplosion(m.x, m.y, '#ff3860', m.blast * 0.5);
+  spawnShockwave(m.x, m.y, '#ffb347');
+  run.screenShake = Math.max(run.screenShake, 9);
+  const p = run.player;
+  if (!run.waveCleared && Math.hypot(p.x - m.x, p.y - m.y) < m.blast + p.r * 0.5) damagePlayer(1);
+  const diff = run.currentWaveInfo ? run.currentWaveInfo.diffMul : 1;
+  for (const e of [...run.enemies]) {
+    if (e.dead || isBossType(e.type)) continue;
+    if (Math.hypot(e.x - m.x, e.y - m.y) < m.blast + e.r && damageEnemy(e, 5 * Math.sqrt(diff)) && e.hp <= 0) {
+      killEnemy(run.enemies.indexOf(e));
+    }
+  }
+  // Chain reaction: nearby mines go off a beat later
+  for (const o of run.hazards) {
+    if (o.kind === 'mine' && Math.hypot(o.x - m.x, o.y - m.y) < m.blast * 1.4 && (o.fuse <= 0 || o.fuse > 0.15)) {
+      o.fuse = o.fuseMax = 0.15;
+    }
+    if (o.kind === 'rock' && Math.hypot(o.x - m.x, o.y - m.y) < m.blast + o.r) o.hp -= 3;
+  }
+}
+
+function spawnRockDebris(x, y, r, rim) {
+  const n = Math.min(18, 6 + Math.floor(r / 2));
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * TAU, sp = 60 + Math.random() * 220;
+    run.particles.push({
+      x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      life: 0.5 + Math.random() * 0.4, maxLife: 0.9,
+      color: i % 3 === 0 ? rim : '#8a7a6a', size: 1.5 + Math.random() * 2.5, debris: true
+    });
+  }
+  run.particles.push({ x, y, vx: 0, vy: 0, life: 0.35, maxLife: 0.35, color: rim, size: r * 0.6, ring: true });
+}
+
+function updateHazards(dt) {
+  const p = run.player;
+  const rand = run.hazardRand || Math.random;
+  // Once the wave is clear, leftovers keep drifting but can't hurt you
+  // (you're picking an upgrade)
+  const live = !run.waveCleared;
+  const hurt = () => { if (live) damagePlayer(1); };
+  // Timed hazards keep coming until the wave is clear
+  if (!run.waveCleared) {
+    for (const kind of HAZARD_TIMED) {
+      const c = run.hazardClock[kind];
+      if (!c) continue;
+      c.left -= dt;
+      if (c.left <= 0) {
+        c.left = c.every * (0.75 + rand() * 0.5);
+        spawnHazard(kind.slice(0, -1));
+      }
+    }
+  }
+
+  let wells = null;
+  for (let i = run.hazards.length - 1; i >= 0; i--) {
+    const h = run.hazards[i];
+    if (!h) continue;
+    if (h.kind === 'rock') {
+      h.x += h.vx * dt;
+      h.y += h.vy * dt;
+      h.rot += h.spin * dt;
+      if (h.hitFlash > 0) h.hitFlash -= dt;
+      // Wrap around the screen like the classic
+      const m = h.r + 4;
+      if (h.x < -m) h.x = W + m; else if (h.x > W + m) h.x = -m;
+      if (h.y < -m) h.y = H + m; else if (h.y > H + m) h.y = -m;
+      // Bounce off static cover
+      for (const o of run.obstacles) {
+        const res = pushOutOf(h.x, h.y, h.r, o);
+        if (!res) continue;
+        h.x = res.x; h.y = res.y;
+        const dot = h.vx * res.nx + h.vy * res.ny;
+        if (dot < 0) { h.vx -= 2 * dot * res.nx; h.vy -= 2 * dot * res.ny; }
+      }
+      if (h.hp <= 0) { shatterRock(h, true); continue; }
+      if (live && p.iframes <= 0 && circleHit(h.x, h.y, h.r, p.x, p.y, p.r)) {
+        damagePlayer(1);
+        shatterRock(h, false);
+      }
+    } else if (h.kind === 'mine') {
+      h.x += h.vx * dt;
+      h.y += h.vy * dt;
+      if (h.x < 30 || h.x > W - 30) h.vx *= -1;
+      if (h.y < 30 || h.y > H - 30) h.vy *= -1;
+      if (h.fuse > 0) {
+        h.fuse -= dt;
+        if (h.fuse <= 0) explodeMine(h);
+      } else if (live && Math.hypot(p.x - h.x, p.y - h.y) < h.trigger) {
+        h.fuse = h.fuseMax = 0.7;
+      }
+    } else if (h.kind === 'well') {
+      (wells || (wells = [])).push(h);
+      if (h.life) {
+        h.life -= dt;
+        if (h.life <= 0) { spawnShockwave(h.x, h.y, h.color); removeHazard(h); continue; }
+      }
+      if (live) pullPlayer(h.x, h.y, h.strength, h.reach, dt);
+      if (p.iframes <= 0 && Math.hypot(p.x - h.x, p.y - h.y) < h.core + p.r) hurt();
+    } else if (h.kind === 'gate') {
+      h.t = (h.t + dt) % (h.offTime + h.warnTime + h.onTime);
+      h.state = h.t < h.offTime ? 'off' : h.t < h.offTime + h.warnTime ? 'warn' : 'on';
+      if (h.state === 'on') {
+        if (p.iframes <= 0 && segDist(p.x, p.y, h.x1, h.y1, h.x2, h.y2) < h.width / 2 + p.r * 0.8) hurt();
+        for (const e of run.enemies) {
+          if (!isBossType(e.type) && segDist(e.x, e.y, h.x1, h.y1, h.x2, h.y2) < h.width / 2 + e.r) {
+            damageEnemy(e, 6 * dt);
+            if (e.hp <= 0) { killEnemy(run.enemies.indexOf(e)); break; }
+          }
+        }
+      }
+    } else if (h.kind === 'comet') {
+      if (h.warn > 0) { h.warn -= dt; continue; }
+      h.x += h.vx * dt;
+      h.y += h.vy * dt;
+      if (Math.random() < 0.6) {
+        run.particles.push({ x: h.x, y: h.y, vx: -h.vx * 0.1 + (Math.random() - 0.5) * 60, vy: -h.vy * 0.1 + (Math.random() - 0.5) * 60, life: 0.5, maxLife: 0.5, color: '#bff4ff', size: 2 });
+      }
+      if (p.iframes <= 0 && circleHit(h.x, h.y, h.r, p.x, p.y, p.r)) hurt();
+      for (const e of [...run.enemies]) {
+        if (!e.dead && !isBossType(e.type) && circleHit(h.x, h.y, h.r, e.x, e.y, e.r) && damageEnemy(e, 8) && e.hp <= 0) {
+          killEnemy(run.enemies.indexOf(e));
+        }
+      }
+      for (const o of [...run.hazards]) {
+        if (o.kind === 'rock' && circleHit(h.x, h.y, h.r, o.x, o.y, o.r)) shatterRock(o, false);
+      }
+      if (h.x < -300 || h.x > W + 300 || h.y < -300 || h.y > H + 300) removeHazard(h);
+    } else if (h.kind === 'flare') {
+      if (h.warn > 0) { h.warn -= dt; continue; }
+      h.burn -= dt;
+      const inBand = (x, y, r) => Math.abs((h.axis === 'x' ? x : y) - h.pos) < h.half + r;
+      if (!h.hit) {
+        h.hit = true;
+        run.screenShake = Math.max(run.screenShake, 6);
+        for (const e of [...run.enemies]) {
+          if (!e.dead && !isBossType(e.type) && inBand(e.x, e.y, e.r) && damageEnemy(e, 4) && e.hp <= 0) killEnemy(run.enemies.indexOf(e));
+        }
+      }
+      if (p.iframes <= 0 && inBand(p.x, p.y, p.r * 0.5)) hurt();
+      // The flare burns away enemy fire in its lane
+      run.enemyProjectiles = run.enemyProjectiles.filter((b) => !inBand(b.x, b.y, 0));
+      if (h.burn <= 0) removeHazard(h);
+    } else if (h.kind === 'strike') {
+      if (h.warn > 0) { h.warn -= dt; continue; }
+      if (!h.struck) {
+        h.struck = true;
+        run.screenShake = Math.max(run.screenShake, 8);
+        spawnExplosion(h.x, h.y, '#c08bff', 20);
+        if (p.iframes <= 0 && Math.hypot(p.x - h.x, p.y - h.y) < h.r + p.r * 0.5) hurt();
+        for (const e of [...run.enemies]) {
+          if (!e.dead && !isBossType(e.type) && Math.hypot(e.x - h.x, e.y - h.y) < h.r + e.r && damageEnemy(e, 6) && e.hp <= 0) killEnemy(run.enemies.indexOf(e));
+        }
+      }
+      h.burn -= dt;
+      if (h.burn <= 0) removeHazard(h);
+    } else if (h.kind === 'pulse') {
+      if (h.warn > 0) { h.warn -= dt; continue; }
+      h.radius += h.speed * dt;
+      const d = Math.hypot(p.x - h.x, p.y - h.y);
+      if (!h.hit && p.iframes <= 0 && Math.abs(d - h.radius) < h.thick + p.r * 0.6) {
+        h.hit = true;
+        hurt();
+      }
+      if (h.radius > h.maxRadius) removeHazard(h);
+    }
+  }
+  run.wells = wells;
+}
+
+// Telegraphs and floor-level hazards go under the action, rocks and mines
+// in the middle, comets and lightning on top.
+function drawHazards(layer, time) {
+  for (const h of run.hazards) {
+    if (layer === 'under') {
+      if (h.kind === 'flare') drawFlare(ctx, h, W, H, time);
+      else if (h.kind === 'gate') drawGate(ctx, h, time);
+      else if (h.kind === 'pulse') drawPulse(ctx, h, time);
+      else if (h.kind === 'well') drawWell(ctx, h, time);
+    } else if (layer === 'mid') {
+      if (h.kind === 'rock') drawRock(ctx, h);
+      else if (h.kind === 'mine') drawMine(ctx, h, time);
+    } else if (layer === 'over') {
+      if (h.kind === 'comet') drawComet(ctx, h, time);
+      else if (h.kind === 'strike') drawStrike(ctx, h, time);
+    }
+  }
+}
+
 function updateSpawning(dt) {
   run.spawnTimer += dt;
   while (run.spawnQueue.length > 0 && run.spawnTimer >= run.spawnQueue[0].delay) {
@@ -3610,7 +4178,9 @@ function updateEnemies(dt) {
     const dist = Math.hypot(dx, dy) || 1;
     const spd = e.baseSpeed;
 
-    if (e.ai === 'chase') {
+    if (updateSpaceEnemy(e, dt, bossApi)) {
+      // Sector bosses and their adds run in bosses.js
+    } else if (e.ai === 'chase') {
       e.vx = (dx / dist) * spd;
       e.vy = (dy / dist) * spd;
     } else if (e.ai === 'zigzag') {
@@ -3729,11 +4299,12 @@ function updateEnemies(dt) {
         // Spawn 2 grunt adds at own position
         for (let k = 0; k < 2; k++) {
           const adjInfo = run.currentWaveInfo;
-          spawnEnemy('grunt', 0.5, adjInfo ? adjInfo.diffMul * 0.6 : 1);
-          // Move last spawned to near the hive
-          const last = run.enemies[run.enemies.length - 1];
+          const last = spawnEnemy('grunt', 0.5, adjInfo ? adjInfo.diffMul * 0.6 : 1);
+          // Move it to near the hive; adds die with their hive
           last.x = e.x + (gameRand() - 0.5) * 40;
           last.y = e.y + (gameRand() - 0.5) * 40;
+          last.owner = e;
+          last.minion = true;
         }
         spawnExplosion(e.x, e.y, '#39ff14', 25);
         e.fireCD = e.fireRate;
@@ -3826,8 +4397,8 @@ function updateEnemies(dt) {
     // Move enemies, respecting obstacles.
     // Phantoms phase through walls while intangible.
     // Bosses (mega/mini) ignore obstacles — they need to reach the battlefield.
-    const isBoss = ['warden', 'obelisk', 'hive', 'sentinel', 'prism'].includes(e.type);
-    if (isBoss || e.intangible) {
+    const isBoss = isBossType(e.type);
+    if (isBoss || e.intangible || e.type === 'node') {
       e.x += e.vx * dt;
       e.y += e.vy * dt;
     } else {
@@ -3837,24 +4408,70 @@ function updateEnemies(dt) {
       e.x = res.x;
       e.y = res.y;
     }
+    if (e.shieldHit > 0) e.shieldHit -= dt;
+    // Once a boss has flown in, it stays on screen
+    if (isBoss) {
+      if (!e.entered && e.y > e.r && e.y < H - e.r && e.x > e.r && e.x < W - e.r) e.entered = true;
+      if (e.entered) {
+        e.x = Math.max(e.r * 0.5, Math.min(W - e.r * 0.5, e.x));
+        e.y = Math.max(e.r * 0.5, Math.min(H - e.r * 0.5, e.y));
+      }
+    }
 
     // Collide with player (phantoms in intangible phase don't collide)
     if (p.iframes <= 0 && !e.intangible && circleHit(e.x, e.y, e.r, p.x, p.y, p.r)) {
       damagePlayer(1);
     }
+    // Multi-part bosses: every part is solid
+    if (e.parts && p.iframes <= 0) {
+      for (const pt of e.parts) {
+        if (circleHit(pt.x, pt.y, pt.r, p.x, p.y, p.r)) { damagePlayer(1); break; }
+      }
+    }
   }
 }
 
-function enemyShoot(x, y, angle, speed, color) {
-  run.enemyProjectiles.push({
+// opts (all optional), used by the sector bosses:
+//   kind      look: 'orb' (default), 'shard', 'ice', 'rock', 'flame', 'missile', 'ink'
+//   r, life   size and lifetime
+//   accel     speed change per second, clamped to [minSpeed, maxSpeed]
+//   turn      constant curve in rad/s
+//   homing    max turn toward the player in rad/s
+//   delay     hang in place this long before moving
+//   grow      radius growth per second, up to maxR
+//   burst     { count, speed, color, kind }: pops into a ring when life runs out
+//   orbit     { center, vt, vr, minR }: spirals around center (an object with x/y)
+const ENEMY_BULLET_CAP = 900;
+function enemyShoot(x, y, angle, speed, color, opts) {
+  if (run.enemyProjectiles.length >= ENEMY_BULLET_CAP) return null;
+  const b = {
     x, y,
     vx: Math.cos(angle) * speed,
     vy: Math.sin(angle) * speed,
     r: 5,
     life: 6,
     color,
-    grazed: false
-  });
+    grazed: false,
+    kind: 'orb',
+    age: 0
+  };
+  if (opts) {
+    Object.assign(b, opts);
+    if (opts.r) b.r = opts.r;
+    if (opts.life) b.life = opts.life;
+  }
+  run.enemyProjectiles.push(b);
+  return b;
+}
+
+function steerToward(b, tx, ty, maxTurn) {
+  const cur = Math.atan2(b.vy, b.vx);
+  const want = Math.atan2(ty - b.y, tx - b.x);
+  const d = Math.atan2(Math.sin(want - cur), Math.cos(want - cur));
+  const a = cur + Math.max(-maxTurn, Math.min(maxTurn, d));
+  const sp = Math.hypot(b.vx, b.vy);
+  b.vx = Math.cos(a) * sp;
+  b.vy = Math.sin(a) * sp;
 }
 
 function updateProjectiles(dt) {
@@ -3887,12 +4504,26 @@ function updateProjectiles(dt) {
     pr.y += pr.vy * dt;
     pr.life -= dt;
 
+    // Gravity wells bend your shots too
+    if (run.wells && applyWellGravity(pr, dt)) {
+      run.projectiles.splice(i, 1);
+      continue;
+    }
+
     // Check if the bullet's travel segment hit an obstacle
-    if (run.obstacles && run.obstacles.length > 0 && segmentHitsObstacle(prevX, prevY, pr.x, pr.y)) {
+    const wall = run.obstacles && run.obstacles.length > 0 ? segmentHitsObstacle(prevX, prevY, pr.x, pr.y) : null;
+    if (wall) {
       // Ricochet off the obstacle if available, else destroy
       if (pr.ricochet > 0) {
-        // Simple ricochet: flip whichever axis is the larger velocity component
-        if (Math.abs(pr.vx) > Math.abs(pr.vy)) pr.vx *= -1;
+        if (wall.shape === 'circle') {
+          // Bounce off the rock's surface
+          const nx0 = prevX - wall.x, ny0 = prevY - wall.y;
+          const nl = Math.hypot(nx0, ny0) || 1;
+          const nx = nx0 / nl, ny = ny0 / nl;
+          const dot = pr.vx * nx + pr.vy * ny;
+          pr.vx -= 2 * dot * nx;
+          pr.vy -= 2 * dot * ny;
+        } else if (Math.abs(pr.vx) > Math.abs(pr.vy)) pr.vx *= -1;
         else pr.vy *= -1;
         pr.ricochet--;
         // Back off a touch so we're not immediately inside the wall
@@ -3901,6 +4532,18 @@ function updateProjectiles(dt) {
         spawnHitParticles(prevX, prevY, '#ffffff');
       } else {
         spawnHitParticles(pr.x, pr.y, '#ffffff');
+        run.projectiles.splice(i, 1);
+        continue;
+      }
+    }
+
+    // Asteroids and mines take hits (beams punch straight through)
+    const hz = hazardHitByShot(pr);
+    if (hz) {
+      pr.hitIds.add(hz);
+      damageHazard(hz, pr.damage);
+      spawnHitParticles(pr.x, pr.y, hz.kind === 'mine' ? '#ff3860' : '#ffffff');
+      if (!pr.beam) {
         run.projectiles.splice(i, 1);
         continue;
       }
@@ -3918,28 +4561,30 @@ function updateProjectiles(dt) {
 
     // Hit enemies
     let consumed = false;
-    for (let j = 0; j < enemies.length; j++) {
+    for (let j = enemies.length - 1; j >= 0; j--) {
       const e = enemies[j];
-      if (pr.hitIds.has(j)) continue;
-      if (circleHit(pr.x, pr.y, pr.r, e.x, e.y, e.r)) {
-        e.hp -= pr.damage;
-        e.hitFlash = 0.1;
-        pr.hitIds.add(j);
+      if (!e || pr.hitIds.has(e)) continue;
+      if (e.intangible) continue;
+      if (enemyHitTest(e, pr.x, pr.y, pr.r)) {
+        pr.hitIds.add(e);
+        if (!damageEnemy(e, pr.damage)) {
+          // Shielded: the shot splashes off
+          spawnHitParticles(pr.x, pr.y, '#00f0ff');
+          consumed = true;
+          break;
+        }
         spawnHitParticles(pr.x, pr.y, pr.crit ? '#ffea00' : e.color);
         if (pr.explosive) {
           // Small AOE
-          for (const other of enemies) {
-            if (other === e) continue;
+          for (const other of [...enemies]) {
+            if (other === e || other.dead) continue;
             const d = Math.hypot(other.x - pr.x, other.y - pr.y);
-            if (d < 60) {
-              other.hp -= pr.damage * 0.5;
-              if (other.hp <= 0) killEnemy(enemies.indexOf(other));
-            }
+            if (d < 60 && damageEnemy(other, pr.damage * 0.5) && other.hp <= 0) killEnemy(enemies.indexOf(other));
           }
           spawnExplosion(pr.x, pr.y);
         }
-        if (e.hp <= 0) {
-          killEnemy(j);
+        if (e.hp <= 0 && !e.dead) {
+          killEnemy(enemies.indexOf(e));
         }
         if (pr.pierce > 0) {
           pr.pierce--;
@@ -3958,12 +4603,71 @@ function updateEnemyProjectiles(dt) {
   for (let i = run.enemyProjectiles.length - 1; i >= 0; i--) {
     const b = run.enemyProjectiles[i];
     const prevX = b.x, prevY = b.y;
-    b.x += b.vx * dt;
-    b.y += b.vy * dt;
+    b.age += dt;
     b.life -= dt;
 
+    if (b.delay > 0) {
+      b.delay -= dt;
+    } else if (b.orbit) {
+      // Spiral around a (possibly moving) center
+      const o = b.orbit;
+      let dx = b.x - o.center.x, dy = b.y - o.center.y;
+      let rr = Math.hypot(dx, dy);
+      let th = Math.atan2(dy, dx);
+      rr += o.vr * dt;
+      th += (o.vt / Math.max(rr, 20)) * dt;
+      if (rr <= (o.minR || 8) || o.center.dead) {
+        run.enemyProjectiles.splice(i, 1);
+        continue;
+      }
+      b.x = o.center.x + Math.cos(th) * rr;
+      b.y = o.center.y + Math.sin(th) * rr;
+      b.vx = (b.x - prevX) / Math.max(dt, 1e-4);
+      b.vy = (b.y - prevY) / Math.max(dt, 1e-4);
+    } else {
+      if (b.accel) {
+        const sp = Math.hypot(b.vx, b.vy) || 1;
+        const ns = Math.max(b.minSpeed ?? 30, Math.min(b.maxSpeed ?? 900, sp + b.accel * dt));
+        b.vx *= ns / sp; b.vy *= ns / sp;
+      }
+      if (b.turn) {
+        const c = Math.cos(b.turn * dt), sn = Math.sin(b.turn * dt);
+        const vx = b.vx * c - b.vy * sn;
+        b.vy = b.vx * sn + b.vy * c;
+        b.vx = vx;
+      }
+      if (b.homing && b.age < (b.homeTime ?? 2.2)) steerToward(b, p.x, p.y, b.homing * dt);
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    }
+    if (b.grow && b.r < (b.maxR || 20)) b.r = Math.min(b.maxR || 20, b.r + b.grow * dt);
+
+    // Gravity wells bend shots and swallow them
+    if (run.wells && applyWellGravity(b, dt)) {
+      run.enemyProjectiles.splice(i, 1);
+      continue;
+    }
+
+    // Burst shells pop into a ring of shards at the end of their life
+    if (b.burst && b.life <= 0) {
+      const bs = b.burst;
+      const off = Math.random() * Math.PI * 2;
+      run.enemyProjectiles.splice(i, 1);
+      for (let k = 0; k < bs.count; k++) {
+        enemyShoot(b.x, b.y, off + (k / bs.count) * Math.PI * 2, bs.speed, bs.color, { kind: bs.kind || 'orb' });
+      }
+      spawnHitParticles(b.x, b.y, b.color);
+      continue;
+    }
+
     // Obstacle collision: walls block enemy bullets (cover mechanic)
-    if (run.obstacles && run.obstacles.length > 0 && segmentHitsObstacle(prevX, prevY, b.x, b.y)) {
+    if (run.obstacles && run.obstacles.length > 0 && !b.orbit && segmentHitsObstacle(prevX, prevY, b.x, b.y)) {
+      spawnHitParticles(b.x, b.y, b.color);
+      run.enemyProjectiles.splice(i, 1);
+      continue;
+    }
+    // Drifting asteroids soak up shots too
+    if (hazardBlocksShot(b)) {
       spawnHitParticles(b.x, b.y, b.color);
       run.enemyProjectiles.splice(i, 1);
       continue;
@@ -3971,14 +4675,15 @@ function updateEnemyProjectiles(dt) {
 
     // Graze detection
     const gd = Math.hypot(b.x - p.x, b.y - p.y);
-    if (!b.grazed && gd < 25 && gd > p.r + b.r) {
+    if (!b.grazed && gd < 25 + b.r && gd > p.r + b.r) {
       b.grazed = true;
       // graze: add to combo without breaking
       addCombo(run.passives.grazeBonus);
       spawnFloat(b.x, b.y, 'GRAZE', '#00f0ff', 12);
     }
 
-    if (b.life <= 0 || b.x < -20 || b.x > W + 20 || b.y < -20 || b.y > H + 20) {
+    const m = 40 + b.r;
+    if (b.life <= 0 || b.x < -m || b.x > W + m || b.y < -m || b.y > H + m) {
       run.enemyProjectiles.splice(i, 1);
       continue;
     }
@@ -3990,8 +4695,66 @@ function updateEnemyProjectiles(dt) {
   }
 }
 
+// ============================================================
+// BEAMS: telegraphed boss lasers
+// ============================================================
+// A beam shows a thin flickering line for `warn` seconds, then burns for
+// `life` seconds. Its owner moves/aims it each frame by writing x, y,
+// angle (and len). Beams die with their owner.
+function addBeam(owner, opts) {
+  const b = {
+    owner,
+    x: owner.x, y: owner.y,
+    angle: opts.angle ?? 0,
+    len: opts.len ?? 2400,
+    width: opts.width ?? 12,
+    warn: opts.warn ?? 1,
+    warnMax: opts.warn ?? 1,
+    life: opts.life ?? 1,
+    color: opts.color || '#ffffff',
+    done: false
+  };
+  run.beams.push(b);
+  return b;
+}
+
+function updateBeams(dt) {
+  const p = run.player;
+  for (let i = run.beams.length - 1; i >= 0; i--) {
+    const b = run.beams[i];
+    if (b.owner && b.owner.dead) b.done = true;
+    if (b.done) { run.beams.splice(i, 1); continue; }
+    if (b.warn > 0) { b.warn -= dt; continue; }
+    b.life -= dt;
+    if (b.life <= 0) { b.done = true; run.beams.splice(i, 1); continue; }
+    const x2 = b.x + Math.cos(b.angle) * b.len, y2 = b.y + Math.sin(b.angle) * b.len;
+    if (p.iframes <= 0 && segDist(p.x, p.y, b.x, b.y, x2, y2) < b.width / 2 + p.r * 0.7) damagePlayer(1);
+  }
+}
+
+// Damage that respects shields. Returns false if the enemy shrugged it off.
+function damageEnemy(e, amt) {
+  if (e.shielded) {
+    e.shieldHit = 0.15;
+    return false;
+  }
+  e.hp -= amt;
+  e.hitFlash = 0.1;
+  return true;
+}
+
+// Body or any part of a multi-part boss
+function enemyHitTest(e, x, y, r) {
+  if (circleHit(x, y, r, e.x, e.y, e.r)) return true;
+  if (e.parts) {
+    for (const pt of e.parts) if (circleHit(x, y, r, pt.x, pt.y, pt.r)) return true;
+  }
+  return false;
+}
+
 function damagePlayer(amt) {
   if (run.player.iframes > 0 || run.player.invulnDash > 0) return;
+  if (DEV_GOD) { run.player.iframes = 0.3; return; }
   // Royal's deflector soaks the hit, then recharges.
   if (run.player.shieldUp) {
     run.player.shieldUp = false;
@@ -4025,11 +4788,13 @@ function damagePlayer(amt) {
 
 function killEnemy(idx) {
   const e = run.enemies[idx];
-  if (!e) return;
+  if (!e || e.dead) return;
+  e.dead = true;
   // Boss death sound
-  const isBossKill = ['warden', 'obelisk', 'hive', 'sentinel', 'prism'].includes(e.type);
+  const isBossKill = isBossType(e.type);
   if (isBossKill) playSound('explosion');
   run.enemies.splice(idx, 1);
+  if (isBossKill) bossDeath(e);
   run.score += Math.ceil(e.score * run.comboMult);
   addCombo(1);
   spawnExplosion(e.x, e.y, e.color, e.r);
@@ -4051,7 +4816,7 @@ function killEnemy(idx) {
   // Drop cores - scales with enemy type
   let coreCount;
   if (['warden'].includes(e.type)) coreCount = 30 + Math.floor(gameRand() * 15);
-  else if (['obelisk', 'hive', 'sentinel', 'prism'].includes(e.type)) coreCount = 12 + Math.floor(gameRand() * 8);
+  else if (isBossKill) coreCount = 12 + Math.floor(gameRand() * 8);
   else if (['bomber', 'lancer', 'splitter'].includes(e.type)) coreCount = 2 + (gameRand() < 0.3 ? 1 : 0);
   else coreCount = 1 + (gameRand() < 0.3 ? 1 : 0);
 
@@ -4069,13 +4834,13 @@ function killEnemy(idx) {
 
   // Screen shake
   if (e.type === 'warden') run.screenShake = Math.max(run.screenShake, 25);
-  else if (['obelisk', 'hive', 'sentinel', 'prism'].includes(e.type)) run.screenShake = Math.max(run.screenShake, 14);
+  else if (isBossKill) run.screenShake = Math.max(run.screenShake, 14);
   else run.screenShake = Math.max(run.screenShake, 4);
 
   if (run.passives.onKillShockwave) {
     for (const other of run.enemies) {
       const d = Math.hypot(other.x - e.x, other.y - e.y);
-      if (d < 120) other.hp -= 1;
+      if (d < 120) damageEnemy(other, 1);
     }
     spawnShockwave(e.x, e.y, '#00f0ff');
   }
@@ -4083,9 +4848,59 @@ function killEnemy(idx) {
   // Random powerup drop (bosses have much higher chance)
   let dropMultiplier = 1;
   if (e.type === 'warden') dropMultiplier = 10;  // always drops from mega boss
-  else if (['obelisk', 'hive', 'sentinel', 'prism'].includes(e.type)) dropMultiplier = 6;
+  else if (isBossKill) dropMultiplier = 6;
   else if (['bomber', 'lancer', 'splitter'].includes(e.type)) dropMultiplier = 2;
   maybeDropPowerup(e.x, e.y, dropMultiplier);
+}
+
+// A boss goes out in a chain of explosions and takes its adds, beams,
+// mines and wells with it.
+function bossDeath(e) {
+  for (let i = run.enemies.length - 1; i >= 0; i--) {
+    const m = run.enemies[i];
+    if (m && m.owner === e) killEnemy(run.enemies.indexOf(m));
+  }
+  run.beams = run.beams.filter((b) => b.owner !== e);
+  for (let i = run.hazards.length - 1; i >= 0; i--) {
+    const h = run.hazards[i];
+    if (h.owner !== e) continue;
+    spawnExplosion(h.x ?? e.x, h.y ?? e.y, '#ffffff', 10);
+    run.hazards.splice(i, 1);
+  }
+  run.enemyProjectiles = run.enemyProjectiles.filter((b) => !(b.orbit && b.orbit.center === e));
+  const pts = e.parts && e.parts.length ? e.parts : [{ x: e.x, y: e.y }];
+  for (let k = 0; k < 9; k++) {
+    const at = pts[k % pts.length];
+    run.fxQueue.push({
+      t: 0.12 * k + Math.random() * 0.08,
+      x: at.x + (Math.random() - 0.5) * e.r * 1.6,
+      y: at.y + (Math.random() - 0.5) * e.r * 1.6,
+      color: k % 3 === 0 ? '#ffffff' : e.color,
+      size: 18 + Math.random() * 20
+    });
+  }
+  run.fxQueue.push({ t: 1.15, x: e.x, y: e.y, color: e.color, size: e.r * 1.5, big: true });
+  run.flash = Math.max(run.flash, 0.5);
+}
+
+function updateFx(dt) {
+  if (run.flash > 0) run.flash = Math.max(0, run.flash - dt * 1.6);
+  for (let i = run.fxQueue.length - 1; i >= 0; i--) {
+    const f = run.fxQueue[i];
+    f.t -= dt;
+    if (f.t > 0) continue;
+    run.fxQueue.splice(i, 1);
+    spawnExplosion(f.x, f.y, f.color, f.size);
+    if (f.big) {
+      spawnShockwave(f.x, f.y, f.color);
+      spawnShockwave(f.x, f.y, '#ffffff');
+      run.flash = Math.max(run.flash, 0.8);
+      run.screenShake = Math.max(run.screenShake, 20);
+      playSound('explosion');
+    } else {
+      run.screenShake = Math.max(run.screenShake, 6);
+    }
+  }
 }
 
 function updateParticles(dt) {
@@ -4220,11 +5035,21 @@ function circleHit(x1, y1, r1, x2, y2, r2) {
 // ============================================================
 // OBSTACLE COLLISION HELPERS
 // ============================================================
+// Obstacles are circles (asteroids, ice, crystals, gate pylons) or
+// axis-aligned rects (wreckage, station modules).
+function obstacleOverlap(cx, cy, cr, o) {
+  if (o.shape === 'circle') {
+    const dx = cx - o.x, dy = cy - o.y, rr = cr + o.r;
+    return dx * dx + dy * dy < rr * rr;
+  }
+  return circleRectOverlap(cx, cy, cr, o);
+}
+
 // Check if a circle (x, y, r) overlaps any obstacle
 function isInsideObstacle(x, y, r) {
   if (!run || !run.obstacles) return false;
   for (const o of run.obstacles) {
-    if (circleRectOverlap(x, y, r, o)) return true;
+    if (obstacleOverlap(x, y, r, o)) return true;
   }
   return false;
 }
@@ -4238,42 +5063,63 @@ function circleRectOverlap(cx, cy, cr, rect) {
   return (dx * dx + dy * dy) < cr * cr;
 }
 
-// Move a circle from (fromX, fromY) toward (toX, toY), stopping at obstacle edges.
-// Returns the final position. Handles axis-separated sliding so you can slide along walls.
+// Where a circle overlapping obstacle o has to go to just touch it, plus
+// the surface normal. null if they don't overlap.
+function pushOutOf(cx, cy, cr, o) {
+  if (o.shape === 'circle') {
+    const dx = cx - o.x, dy = cy - o.y;
+    const d = Math.hypot(dx, dy), rr = cr + o.r;
+    if (d >= rr) return null;
+    const nx = d > 1e-3 ? dx / d : 1, ny = d > 1e-3 ? dy / d : 0;
+    return { x: o.x + nx * rr, y: o.y + ny * rr, nx, ny };
+  }
+  const qx = Math.max(o.x, Math.min(cx, o.x + o.w));
+  const qy = Math.max(o.y, Math.min(cy, o.y + o.h));
+  const dx = cx - qx, dy = cy - qy;
+  const d = Math.hypot(dx, dy);
+  if (d >= cr) return null;
+  if (d > 1e-3) return { x: qx + (dx / d) * cr, y: qy + (dy / d) * cr, nx: dx / d, ny: dy / d };
+  // Center inside the rect: leave by the nearest side
+  const left = cx - o.x, right = o.x + o.w - cx, top = cy - o.y, bottom = o.y + o.h - cy;
+  const m = Math.min(left, right, top, bottom);
+  if (m === left) return { x: o.x - cr, y: cy, nx: -1, ny: 0 };
+  if (m === right) return { x: o.x + o.w + cr, y: cy, nx: 1, ny: 0 };
+  if (m === top) return { x: cx, y: o.y - cr, nx: 0, ny: -1 };
+  return { x: cx, y: o.y + o.h + cr, nx: 0, ny: 1 };
+}
+
+// Move a circle from (fromX, fromY) toward (toX, toY), stopping at obstacle
+// edges. Overlaps are pushed out along the surface normal, so the circle
+// slides along walls and curves around rocks. Long moves (dashes) go in
+// small steps so they can't tunnel through thin cover.
 function resolveCircleMove(fromX, fromY, toX, toY, r) {
   if (!run || !run.obstacles || run.obstacles.length === 0) {
     return { x: toX, y: toY };
   }
-  // Try X axis move first
-  let nx = toX;
-  let ny = fromY;
-  for (const o of run.obstacles) {
-    if (circleRectOverlap(nx, ny, r, o)) {
-      // Blocked on X; revert
-      nx = fromX;
-      break;
+  const steps = Math.max(1, Math.ceil(Math.hypot(toX - fromX, toY - fromY) / Math.max(4, r * 0.8)));
+  const sx = (toX - fromX) / steps, sy = (toY - fromY) / steps;
+  let x = fromX, y = fromY;
+  for (let i = 0; i < steps; i++) {
+    x += sx;
+    y += sy;
+    for (let pass = 0; pass < 2; pass++) {
+      for (const o of run.obstacles) {
+        const res = pushOutOf(x, y, r, o);
+        if (res) { x = res.x; y = res.y; }
+      }
     }
   }
-  // Then try Y axis from the resolved X position
-  let fx = nx;
-  let fy = toY;
-  for (const o of run.obstacles) {
-    if (circleRectOverlap(fx, fy, r, o)) {
-      fy = fromY;
-      break;
-    }
-  }
-  return { x: fx, y: fy };
+  return { x, y };
 }
 
 // Check if a line segment from (x1,y1) to (x2,y2) hits any obstacle.
-// Returns true if blocked (for bullet destruction).
+// Returns the obstacle it hit (for bullet destruction and ricochets).
 function segmentHitsObstacle(x1, y1, x2, y2) {
-  if (!run || !run.obstacles || run.obstacles.length === 0) return false;
+  if (!run || !run.obstacles || run.obstacles.length === 0) return null;
   for (const o of run.obstacles) {
-    if (segmentIntersectsRect(x1, y1, x2, y2, o)) return true;
+    if (o.shape === 'circle' ? segDist(o.x, o.y, x1, y1, x2, y2) < o.r : segmentIntersectsRect(x1, y1, x2, y2, o)) return o;
   }
-  return false;
+  return null;
 }
 
 function segmentIntersectsRect(x1, y1, x2, y2, rect) {
@@ -4300,12 +5146,24 @@ function segmentsIntersect(x1, y1, x2, y2, x3, y3, x4, y4) {
 // ============================================================
 // RENDER
 // ============================================================
-function render() {
-  // Clear with synthwave gradient (done by CSS but let's ensure fresh frame)
-  ctx.fillStyle = 'rgba(10, 5, 20, 0.35)'; // motion blur trails
-  ctx.fillRect(0, 0, W, H);
+let titleSector = null;
+let lastRenderAt = 0;
 
-  if (!run) return;
+function render() {
+  const now = performance.now() / 1000;
+  const frameDt = Math.min(0.05, now - lastRenderAt || 0.016);
+  lastRenderAt = now;
+
+  if (!run) {
+    // Title and menus: a random sector's sky behind the overlay
+    if (!titleSector) titleSector = sectorForWave(1 + Math.floor(Math.random() * SECTORS.length) * WAVES_PER_SECTOR);
+    drawSpaceBackdrop(ctx, W, H, titleSector, now, { px: 0, py: 0 }, frameDt);
+    return;
+  }
+  titleSector = null;
+  const time = run.timeElapsed;
+  const p = run.player;
+  drawSpaceBackdrop(ctx, W, H, run.sector, now, { px: p.x - W / 2, py: p.y - H / 2 }, frameDt);
 
   ctx.save();
   // Screen shake
@@ -4316,64 +5174,35 @@ function render() {
     );
   }
 
-  // Grid floor
-  drawGrid();
+  drawHazards('under', time);
 
-  // Obstacles (walls) - Tron-styled with glow
-  if (run.obstacles && run.obstacles.length > 0) {
-    for (const o of run.obstacles) {
-      // Dark fill
-      ctx.save();
-      ctx.fillStyle = 'rgba(20, 10, 40, 0.85)';
-      ctx.fillRect(o.x, o.y, o.w, o.h);
-      // Outer glow border
-      ctx.shadowColor = '#00f0ff';
-      ctx.shadowBlur = 18;
-      ctx.strokeStyle = '#00f0ff';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(o.x + 1, o.y + 1, o.w - 2, o.h - 2);
-      // Inner accent line (pink, offset)
-      ctx.shadowColor = '#ff2d95';
-      ctx.shadowBlur = 8;
-      ctx.strokeStyle = 'rgba(255, 45, 149, 0.6)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(o.x + 5, o.y + 5, o.w - 10, o.h - 10);
-      // Corner accent dots
-      ctx.shadowBlur = 12;
-      ctx.fillStyle = '#00f0ff';
-      const d = 3;
-      ctx.fillRect(o.x, o.y, d, d);
-      ctx.fillRect(o.x + o.w - d, o.y, d, d);
-      ctx.fillRect(o.x, o.y + o.h - d, d, d);
-      ctx.fillRect(o.x + o.w - d, o.y + o.h - d, d, d);
-      ctx.restore();
+  // Static cover: asteroids, ice, crystals, wreckage, station modules
+  for (const o of run.obstacles) {
+    if (o.noDraw) continue;
+    if (o.shape === 'circle') {
+      drawRock(ctx, { x: o.x, y: o.y, rot: o.rot + time * o.spin, sprite: o.sprite });
+    } else {
+      drawPanel(ctx, o);
     }
   }
 
+  drawHazards('mid', time);
+
   // Pickups
   for (const pk of run.pickups) {
-    ctx.save();
-    ctx.globalAlpha = 0.9;
-    ctx.fillStyle = '#ffea00';
-    ctx.shadowColor = '#ffea00';
-    ctx.shadowBlur = 14;
+    const pulse = 0.85 + Math.sin(time * 8 + pk.x * 0.1) * 0.15;
+    drawGlowSprite(pk.x, pk.y, pk.r * 2.6 * pulse, '#ffea00', 0.9);
+    ctx.fillStyle = '#fff6b0';
     ctx.beginPath();
-    ctx.arc(pk.x, pk.y, pk.r, 0, Math.PI * 2);
+    ctx.arc(pk.x, pk.y, pk.r * 0.45, 0, Math.PI * 2);
     ctx.fill();
-    ctx.restore();
   }
 
+  // Boss lasers (telegraphs and burns)
+  for (const b of run.beams) drawBeam(ctx, b, time);
+
   // Enemy projectiles
-  for (const b of run.enemyProjectiles) {
-    ctx.save();
-    ctx.fillStyle = b.color;
-    ctx.shadowColor = b.color;
-    ctx.shadowBlur = 12;
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
+  for (const b of run.enemyProjectiles) drawEnemyBullet(b, time);
 
   // Enemies
   for (const e of run.enemies) {
@@ -4397,16 +5226,133 @@ function render() {
   drawSnakes();
   drawPowerupDrops();
 
+  drawHazards('over', time);
+
   // Particles
   drawParticles();
 
   ctx.restore();
+
+  // Hyperspace jump and white flashes
+  if (run.warp) drawWarp(ctx, W, H, run.warp.t / WARP_TIME, run.warp.to.accent);
+  if (run.flash > 0) {
+    ctx.fillStyle = `rgba(255, 255, 255, ${Math.min(0.85, run.flash)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
 
   const boss = run.enemies.find((e) => BOSS_TYPES.includes(e.type));
   if (boss) drawBossBar(boss);
 
   // HUD sync (lightweight, every frame)
   updateHUD();
+}
+
+// Soft glow dots, pre-rendered per color: much cheaper than shadowBlur on
+// every bullet and particle.
+const glowSprites = new Map();
+function glowSprite(color) {
+  let s = glowSprites.get(color);
+  if (!s) {
+    s = document.createElement('canvas');
+    s.width = s.height = 64;
+    const g = s.getContext('2d');
+    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, rgba(color, 1));
+    grad.addColorStop(0.25, rgba(color, 0.55));
+    grad.addColorStop(0.6, rgba(color, 0.15));
+    grad.addColorStop(1, rgba(color, 0));
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 64, 64);
+    glowSprites.set(color, s);
+  }
+  return s;
+}
+
+function drawGlowSprite(x, y, size, color, alpha = 1) {
+  const s = glowSprite(color);
+  const prevA = ctx.globalAlpha, prevOp = ctx.globalCompositeOperation;
+  ctx.globalAlpha = alpha;
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.drawImage(s, x - size, y - size, size * 2, size * 2);
+  ctx.globalAlpha = prevA;
+  ctx.globalCompositeOperation = prevOp;
+}
+
+// Enemy shots by kind (see enemyShoot). Glow comes from cached sprites.
+function drawEnemyBullet(b, time) {
+  const hanging = b.delay > 0;
+  drawGlowSprite(b.x, b.y, b.r * (b.kind === 'ink' ? 2.2 : 3), b.color, hanging ? 0.45 + Math.sin(time * 20) * 0.2 : 0.8);
+  const a = Math.atan2(b.vy, b.vx);
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  switch (b.kind) {
+    case 'shard':
+    case 'ice':
+      ctx.rotate(a);
+      ctx.fillStyle = b.kind === 'ice' ? '#e8fbff' : '#ffffff';
+      ctx.beginPath();
+      ctx.moveTo(b.r * 1.8, 0); ctx.lineTo(0, -b.r * 0.7); ctx.lineTo(-b.r * 1.3, 0); ctx.lineTo(0, b.r * 0.7);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      break;
+    case 'rock':
+      ctx.rotate(b.age * 5);
+      ctx.fillStyle = '#6a5040';
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let k = 0; k < 7; k++) {
+        const ka = (k / 7) * Math.PI * 2, kr = b.r * (0.8 + ((k * 37) % 5) * 0.06);
+        k ? ctx.lineTo(Math.cos(ka) * kr, Math.sin(ka) * kr) : ctx.moveTo(Math.cos(ka) * kr, Math.sin(ka) * kr);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      break;
+    case 'flame': {
+      ctx.rotate(a);
+      ctx.globalCompositeOperation = 'lighter';
+      const g = ctx.createLinearGradient(b.r, 0, -b.r * 3, 0);
+      g.addColorStop(0, 'rgba(255, 255, 220, 0.95)');
+      g.addColorStop(0.4, rgba(b.color, 0.7));
+      g.addColorStop(1, rgba(b.color, 0));
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.moveTo(b.r, 0);
+      ctx.quadraticCurveTo(0, -b.r, -b.r * 3, 0);
+      ctx.quadraticCurveTo(0, b.r, b.r, 0);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath(); ctx.arc(0, 0, b.r * 0.5, 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case 'missile':
+      ctx.rotate(a);
+      ctx.fillStyle = '#d8d0c8';
+      ctx.fillRect(-b.r * 1.4, -b.r * 0.4, b.r * 2.4, b.r * 0.8);
+      ctx.fillStyle = b.color;
+      ctx.beginPath(); ctx.moveTo(b.r * 1.6, 0); ctx.lineTo(b.r, -b.r * 0.4); ctx.lineTo(b.r, b.r * 0.4); ctx.fill();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = `rgba(255, 200, 120, ${0.6 + Math.sin(time * 40) * 0.3})`;
+      ctx.beginPath(); ctx.moveTo(-b.r * 1.4, -b.r * 0.4); ctx.lineTo(-b.r * 2.6, 0); ctx.lineTo(-b.r * 1.4, b.r * 0.4); ctx.fill();
+      break;
+    case 'ink':
+      ctx.fillStyle = rgba(b.color, 0.55);
+      ctx.beginPath(); ctx.arc(0, 0, b.r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = rgba('#ffffff', 0.35);
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(0, 0, b.r * (0.7 + Math.sin(time * 6 + b.x) * 0.1), 0, Math.PI * 2); ctx.stroke();
+      break;
+    default:
+      ctx.fillStyle = b.color;
+      ctx.beginPath(); ctx.arc(0, 0, b.r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath(); ctx.arc(0, 0, b.r * 0.45, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
 }
 
 // Glowing capsule bullet; crits are yellow. Shared by single player and
@@ -4443,56 +5389,49 @@ function drawPlayerBullet(pr, baseColor = '#ff2d95') {
 
 function drawParticles() {
   for (const p of run.particles) {
-    const alpha = p.life / p.maxLife;
-    ctx.save();
-    ctx.globalAlpha = alpha;
+    const alpha = Math.max(0, p.life / p.maxLife);
     if (p.text) {
+      ctx.save();
+      ctx.globalAlpha = alpha;
       ctx.fillStyle = p.color;
       ctx.font = `bold ${p.size}px Courier New`;
       ctx.textAlign = 'center';
       ctx.shadowColor = p.color;
       ctx.shadowBlur = 8;
       ctx.fillText(p.text, p.x, p.y);
+      ctx.restore();
     } else if (p.ring) {
       const growth = 1 - alpha;
+      const rr = p.size + growth * 80;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = alpha * 0.35;
       ctx.strokeStyle = p.color;
-      ctx.shadowColor = p.color;
-      ctx.shadowBlur = 20;
-      ctx.lineWidth = 3 * alpha;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size + growth * 80, 0, Math.PI * 2);
-      ctx.stroke();
-    } else {
+      ctx.lineWidth = 9 * alpha;
+      ctx.beginPath(); ctx.arc(p.x, p.y, rr, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth = 2.5 * alpha;
+      ctx.beginPath(); ctx.arc(p.x, p.y, rr, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    } else if (p.debris) {
+      // Tumbling rock chips
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.life * 12);
       ctx.fillStyle = p.color;
-      ctx.shadowColor = p.color;
-      ctx.shadowBlur = 10;
+      ctx.fillRect(-p.size, -p.size * 0.6, p.size * 2, p.size * 1.2);
+      ctx.restore();
+    } else {
+      drawGlowSprite(p.x, p.y, p.size * 3, p.color, alpha * 0.9);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.color;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, p.size * 0.7, 0, Math.PI * 2);
       ctx.fill();
+      ctx.globalAlpha = 1;
     }
-    ctx.restore();
   }
-}
-
-function drawGrid(w = W, h = H) {
-  ctx.save();
-  ctx.strokeStyle = 'rgba(184, 71, 255, 0.12)';
-  ctx.lineWidth = 1;
-  const spacing = 50;
-  const scroll = (run.timeElapsed * 30) % spacing;
-  for (let x = -scroll; x < w; x += spacing) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h);
-    ctx.stroke();
-  }
-  for (let y = -scroll; y < h; y += spacing) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(w, y);
-    ctx.stroke();
-  }
-  ctx.restore();
 }
 
 // Remote player ship colors (up to 3 other pilots, local player is always pink).
@@ -4649,6 +5588,21 @@ function drawPlayer(p = run.player, hullColor = run.player.color || '#ff2d95') {
 }
 
 function drawEnemy(e) {
+  // Sector bosses and their adds draw themselves in world space (bossArt.js)
+  if (drawSpaceEnemy(ctx, e, run.timeElapsed ?? performance.now() / 1000, run.player)) {
+    if (e.hitFlash > 0) {
+      const a = Math.min(1, e.hitFlash / 0.1) * 0.5;
+      drawGlowSprite(e.x, e.y, e.r * 1.6, '#ffffff', a);
+      if (e.parts) for (const pt of e.parts) drawGlowSprite(pt.x, pt.y, pt.r * 1.5, '#ffffff', a * 0.8);
+    }
+    if (e.minion && e.maxHp > 3 && e.hp < e.maxHp) {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(e.x - e.r, e.y - e.r - 10, e.r * 2, 3);
+      ctx.fillStyle = e.color;
+      ctx.fillRect(e.x - e.r, e.y - e.r - 10, e.r * 2 * (e.hp / e.maxHp), 3);
+    }
+    return;
+  }
   ctx.save();
   ctx.translate(e.x, e.y);
   const hpFrac = e.hp / e.maxHp;
@@ -5331,6 +6285,14 @@ function updateHUD() {
     wt.style.color = 'var(--pink)';
     wt.style.textShadow = '';
   }
+  const tag = document.getElementById('sectorTag');
+  if (tag && run.sector) {
+    const label = run.isMultiplayer ? '' : sectorLabel(run.sector);
+    if (tag.textContent !== label) {
+      tag.textContent = label;
+      tag.style.color = run.sector.accent;
+    }
+  }
   document.getElementById('scoreText').textContent = run.score.toLocaleString();
   document.getElementById('coresText').textContent = run.cores;
   document.getElementById('weaponText').textContent = run.weapons.projectileCount > 1
@@ -5562,7 +6524,8 @@ document.getElementById('deathTitleBtn').onclick = () => {
 };
 document.getElementById('leaveShopBtn').onclick = () => {
   hideAll();
-  startWave(run.waveNum + 1);
+  // A boss always closes out a sector, so leaving the shop means a jump
+  beginWarp(run.waveNum + 1);
 };
 document.getElementById('resumeBtn').onclick = togglePause;
 document.getElementById('abandonBtn').onclick = () => {
