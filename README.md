@@ -1,6 +1,6 @@
 # Neon Drift
 
-Roguelike synthwave bullet hell. Endless waves, mini-bosses every 5, Warden every 25. Browser-based, PWA-installable, canvas-rendered, single-player with a global leaderboard.
+Roguelike space bullet hell. Drift through 20 sectors of hostile space, each with its own sky, cover, hazards and boss. The Warden rises every 25 waves. Browser-based, PWA-installable, canvas-rendered, single-player with a global leaderboard and co-op multiplayer.
 
 ## Stack
 
@@ -19,6 +19,11 @@ neon-drift/
 ├── index.html              # Entry HTML (Vite)
 ├── src/
 │   ├── game.js             # Main game loop and logic
+│   ├── sectors.js          # The 20 sectors: sky, cover, hazards, boss
+│   ├── backdrop.js         # Space backdrop (nebulae, stars, planets) + hyperspace jump
+│   ├── spaceArt.js         # Asteroid, wreck and hazard art
+│   ├── bosses.js           # Sector boss stats and attack patterns
+│   ├── bossArt.js          # Sector boss art
 │   ├── leaderboard.js      # Supabase client + score submission
 │   ├── styles.css          # All game styles
 │   ├── menuNav.js          # Gamepad / TV remote / arrow-key menu navigation
@@ -40,6 +45,55 @@ neon-drift/
 ├── vercel.json             # Vercel deploy config + caching headers
 └── .env.example            # Copy to .env.local and fill in
 ```
+
+## Sectors, Hazards and Bosses
+
+A run is a trip through 20 sectors, 5 waves each. The 5th wave of every sector is its boss. Beat it, spend cores in the Black Market, then the ship jumps through hyperspace into the next sector. After sector 20 the rotation starts over one tier harder (bosses gain a +1, sectors a II).
+
+| # | Sector | Hazards | Boss |
+|---|---|---|---|
+| 1 | Outer Rim | drifting asteroids | Obelisk |
+| 2 | Asteroid Belt | dense asteroid field | Colossus |
+| 3 | Crimson Nebula | asteroids, mines | Hive |
+| 4 | Frozen Expanse | ice chunks, comets | Glacier |
+| 5 | Derelict Fleet | wreckage, mines | Warden |
+| 6 | Solar Corona | solar flares | Helios |
+| 7 | The Minefield | lots of mines | Arachne |
+| 8 | Storm Giant | ion storm lightning | Sentinel |
+| 9 | Pulsar Graveyard | shock pulses | Pulsar |
+| 10 | Orbital Ruins | laser gates, station modules | Warden +1 |
+| 11 | Binary Suns | solar flares | Binary |
+| 12 | Crystal Nebula | crystal clusters, mines | Prism |
+| 13 | Abyssal Void | gravity well | Leviathan |
+| 14 | Enemy Shipyard | laser gates, mines | Carrier |
+| 15 | Supernova Remnant | shock pulses | Warden +2 |
+| 16 | Kraken's Reach | asteroids, gravity well, mines | Kraken |
+| 17 | War Zone | wreckage, lightning, comets | Dreadnought |
+| 18 | Nexus Array | laser gates, mines | Nexus |
+| 19 | Event Horizon | gravity wells | Singularity |
+| 20 | Galactic Core | everything at once | Warden +3 |
+
+**Cover** (asteroids with glowing veins, ice, crystal clusters, derelict hull plates, station modules) blocks ships and bullets on both sides. Layouts are seeded by the run seed, so the weekly challenge gets the same maps for everyone.
+
+**Hazards** are in `game.js` under SPACE HAZARDS:
+- Drifting asteroids wrap around the screen and split when shot (big, medium, small), Asteroids style. They hurt on contact and soak up enemy fire.
+- Mines arm when you get close. Shoot one to set it off early; blasts hurt enemies and chain into other mines.
+- Gravity wells pull your ship and bend every bullet nearby.
+- Comets, solar flares, lightning strikes and shock pulses are telegraphed first, then hit.
+- Laser gates cycle off, flicker, on.
+
+Hazards go harmless once a wave is cleared, so nothing hits you while you pick an upgrade. Rock and mine counts scale with screen size.
+
+**Bosses** live in `bosses.js` (attacks) and `bossArt.js` (drawing). They get a small game API instead of reaching into the run, and multi-part bosses (Leviathan's body, the Binary stars, Kraken's arms, the Carrier and Dreadnought turrets) list their hitboxes in `e.parts`.
+
+### Dev shortcuts
+
+In `npm run dev` only (stripped from production builds):
+- `?wave=25` starts runs at wave 25
+- `?god` makes the ship invulnerable
+- `window.__nd` exposes the run, `startWave(n)`, `beginWarp(n)` and `killAll()` in the console
+
+Multiplayer keeps its own server-side wave plan and boss roster (`server/src/enemies.js`); it shares the space backdrops but not the sector hazards or new bosses yet.
 
 ## First-Time Setup
 
