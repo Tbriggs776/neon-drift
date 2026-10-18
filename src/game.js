@@ -7,8 +7,10 @@ import {
   fetchGlobalStats,
   getDisplayName,
   setDisplayName,
-  isLeaderboardEnabled
+  isLeaderboardEnabled,
+  flushPendingScores
 } from './leaderboard.js';
+import { isOffline } from './supabaseClient.js';
 import {
   initAuth,
   onAuthChange,
@@ -5894,6 +5896,8 @@ function gameOver() {
   }).then((result) => {
     if (result.success) {
       toast('Score submitted to leaderboard');
+    } else if (result.reason === 'queued') {
+      toast('Offline: score will post when you reconnect');
     }
   });
 
@@ -6152,6 +6156,10 @@ document.getElementById('abandonBtn').onclick = () => {
       bar.textContent = 'LEADERBOARD OFFLINE · PLAYING LOCALLY';
       return;
     }
+    if (isOffline()) {
+      bar.textContent = 'OFFLINE · SOLO RUNS, SHIPS AND HANGAR STILL WORK';
+      return;
+    }
     bar.textContent = 'LOADING STATS...';
     fetchGlobalStats().then((stats) => {
       if (!stats) {
@@ -6162,6 +6170,16 @@ document.getElementById('abandonBtn').onclick = () => {
     });
   }
   refreshGlobalStats();
+
+  // Coming back online: post runs finished offline and refresh the stats.
+  async function onReconnect() {
+    const sent = await flushPendingScores();
+    if (sent > 0) toast(sent === 1 ? 'Offline run posted to the leaderboard' : `${sent} offline runs posted to the leaderboard`);
+    refreshGlobalStats();
+  }
+  window.addEventListener('online', onReconnect);
+  window.addEventListener('offline', refreshGlobalStats);
+  onReconnect();
 
   // Leaderboard button + scope toggle (Global / Friends)
   let leaderboardScope = 'global';
@@ -6206,6 +6224,10 @@ document.getElementById('abandonBtn').onclick = () => {
     myBestLine.textContent = '';
     if (!isLeaderboardEnabled()) {
       list.innerHTML = '<div class="dim" style="text-align: center; padding: 40px 0;">Leaderboard unavailable (offline mode)</div>';
+      return;
+    }
+    if (isOffline()) {
+      list.innerHTML = '<div class="dim" style="text-align: center; padding: 40px 0;">You\'re offline. Leaderboards come back when you reconnect.</div>';
       return;
     }
     if (leaderboardScope === 'friends' && !isSignedIn()) {
@@ -6253,6 +6275,17 @@ document.getElementById('abandonBtn').onclick = () => {
   const mpLeaveBtn = document.getElementById('mpLeaveBtn');
   const mpCloseBtn = document.getElementById('mpCloseBtn');
   const mpBtn = document.getElementById('multiplayerBtn');
+
+  // Lobby errors in words a pilot can act on; connection failures from the
+  // client library arrive with no message or a raw network one.
+  function mpErrorText(error, fallback) {
+    if (isOffline()) return 'Multiplayer needs an internet connection.';
+    const msg = error?.message || '';
+    if (!msg || msg === fallback || /fetch|network|socket|load failed/i.test(msg)) {
+      return "Couldn't reach the multiplayer server. Check your connection and try again.";
+    }
+    return msg;
+  }
 
   function showMpLobbyMessage(text, kind) {
     if (!mpLobbyMsg) return;
@@ -6313,23 +6346,25 @@ document.getElementById('abandonBtn').onclick = () => {
   }
   if (mpCreateBtn) {
     mpCreateBtn.onclick = async () => {
+      if (isOffline()) { showMpLobbyMessage('Multiplayer needs an internet connection.', 'error'); return; }
       mpCreateBtn.disabled = true;
       showMpLobbyMessage('Creating room...', '');
       const name = (getProfile()?.display_name) || (typeof getDisplayName === 'function' ? getDisplayName() : '') || 'Pilot';
       const { error } = await createRoom(name);
       mpCreateBtn.disabled = false;
-      if (error) showMpLobbyMessage(error.message || 'Create failed', 'error');
+      if (error) showMpLobbyMessage(mpErrorText(error, 'Create failed'), 'error');
     };
   }
   if (mpJoinBtn) {
     mpJoinBtn.onclick = async () => {
       const code = (mpJoinInput?.value || '').trim().toUpperCase();
+      if (isOffline()) { showMpLobbyMessage('Multiplayer needs an internet connection.', 'error'); return; }
       mpJoinBtn.disabled = true;
       showMpLobbyMessage('Joining...', '');
       const name = (getProfile()?.display_name) || (typeof getDisplayName === 'function' ? getDisplayName() : '') || 'Pilot';
       const { error } = await joinRoomByCode(code, name);
       mpJoinBtn.disabled = false;
-      if (error) showMpLobbyMessage(error.message || 'Join failed', 'error');
+      if (error) showMpLobbyMessage(mpErrorText(error, 'Join failed'), 'error');
     };
   }
   if (mpJoinInput) {

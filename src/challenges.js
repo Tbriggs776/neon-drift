@@ -8,7 +8,7 @@
 // a weekly leaderboard can filter cleanly.
 // ============================================================
 
-import { supabase, online } from './supabaseClient.js';
+import { supabase, online, isOffline } from './supabaseClient.js';
 
 // Monday of the current ISO week in UTC, as YYYY-MM-DD.
 export function getCurrentChallengeWeek() {
@@ -29,7 +29,7 @@ export function getCurrentChallengeSeed() {
 }
 
 export async function fetchChallengeLeaderboard(week, limit = 20) {
-  if (!online) return [];
+  if (!online || isOffline()) return [];
   const targetWeek = week || getCurrentChallengeWeek();
   try {
     const { data, error } = await supabase

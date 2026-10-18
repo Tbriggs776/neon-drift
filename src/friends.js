@@ -6,14 +6,14 @@
 // All writes go through RLS — see supabase/phase5_friends.sql.
 // ============================================================
 
-import { supabase, online } from './supabaseClient.js';
+import { supabase, online, isOffline } from './supabaseClient.js';
 import { getSession } from './auth.js';
 
 function meId() { return getSession()?.user?.id || null; }
 
 // ---- Search profiles by display name (case-insensitive partial match) ----
 export async function searchUsers(query) {
-  if (!online) return [];
+  if (!online || isOffline()) return [];
   const q = (query || '').trim();
   if (q.length < 2) return [];
   const me = meId();
@@ -34,7 +34,7 @@ export async function searchUsers(query) {
 
 // ---- Send a request ----
 export async function sendFriendRequest(recipientId) {
-  if (!online) return { error: { message: 'Offline' } };
+  if (!online || isOffline()) return { error: { message: "You're offline" } };
   const me = meId();
   if (!me) return { error: { message: 'Not signed in' } };
   if (me === recipientId) return { error: { message: "Can't friend yourself" } };
@@ -48,7 +48,7 @@ export async function sendFriendRequest(recipientId) {
 
 // ---- Recipient accepts a pending request ----
 export async function acceptFriendRequest(friendshipId) {
-  if (!online) return { error: { message: 'Offline' } };
+  if (!online || isOffline()) return { error: { message: "You're offline" } };
   const { error } = await supabase
     .from('friendships')
     .update({ status: 'accepted' })
@@ -58,7 +58,7 @@ export async function acceptFriendRequest(friendshipId) {
 
 // ---- Either party deletes (decline / cancel / unfriend) ----
 export async function removeFriendship(friendshipId) {
-  if (!online) return { error: { message: 'Offline' } };
+  if (!online || isOffline()) return { error: { message: "You're offline" } };
   const { error } = await supabase
     .from('friendships')
     .delete()
@@ -69,7 +69,7 @@ export async function removeFriendship(friendshipId) {
 // ---- All friendships involving me, split into buckets and enriched with names ----
 export async function fetchMyFriendships() {
   const empty = { incoming: [], outgoing: [], friends: [] };
-  if (!online) return empty;
+  if (!online || isOffline()) return empty;
   const me = meId();
   if (!me) return empty;
 
@@ -114,7 +114,7 @@ export async function fetchMyFriendships() {
 
 // ---- Top scores from me + my accepted friends ----
 export async function fetchFriendsLeaderboard(limit = 20) {
-  if (!online) return [];
+  if (!online || isOffline()) return [];
   const me = meId();
   if (!me) return [];
   try {

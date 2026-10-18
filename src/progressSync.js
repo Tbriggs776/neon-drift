@@ -81,10 +81,26 @@ export function queueProgressPush(meta) {
 async function pushNow(meta) {
   if (!online || !userId || !meta) return;
   clearTimeout(pushTimer);
-  const { error } = await supabase
-    .from('player_progress')
-    .upsert({ user_id: userId, progress: meta, updated_at: new Date().toISOString() });
-  if (error) console.warn('Progress save failed:', error);
+  pushTimer = null;
+  let error = null;
+  try {
+    ({ error } = await supabase
+      .from('player_progress')
+      .upsert({ user_id: userId, progress: meta, updated_at: new Date().toISOString() }));
+  } catch (e) {
+    error = e;
+  }
+  // Offline or a dropped connection: keep it and try again on reconnect.
+  unsentMeta = error ? meta : null;
+  if (error && navigator.onLine !== false) console.warn('Progress save failed:', error);
+}
+
+// Saves made with no connection go up as soon as the device is back online.
+let unsentMeta = null;
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    if (unsentMeta) pushNow(pendingMeta || unsentMeta);
+  });
 }
 
 // Send any waiting save right away (the page is being hidden or closed).

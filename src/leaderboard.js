@@ -7,7 +7,7 @@
 // Falls back to anon_id if not signed in. Game still plays offline.
 // ============================================================
 
-import { supabase, online } from './supabaseClient.js';
+import { supabase, online, isOffline } from './supabaseClient.js';
 import { getSession, getProfile } from './auth.js';
 
 // ---- Anonymous device identity ----
@@ -47,6 +47,18 @@ function isPlausibleScore(submission) {
 }
 
 // ---- Submit run results ----
+// Runs finished without a connection wait here and go up once the device is
+// back online (flushPendingScores), so playing offline still counts.
+const PENDING_KEY = 'neon_drift_pending_scores';
+const MAX_PENDING = 50;
+
+function readPending() {
+  try { return JSON.parse(localStorage.getItem(PENDING_KEY)) || []; } catch { return []; }
+}
+function writePending(list) {
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify(list.slice(-MAX_PENDING))); } catch {}
+}
+
 export async function submitScore({ wave, score, bestCombo, cores, runDurationMs, upgrades, challengeWeek }) {
   if (!online) return { success: false, reason: 'offline' };
   if (!isPlausibleScore({ wave, score, bestCombo, cores })) {
@@ -59,34 +71,68 @@ export async function submitScore({ wave, score, bestCombo, cores, runDurationMs
   const displayName = userId
     ? (profile?.display_name || null)
     : (getDisplayName() || null);
+  const row = {
+    user_id: userId,
+    anon_id: getAnonId(),
+    display_name: displayName,
+    wave,
+    score,
+    best_combo: bestCombo,
+    cores,
+    run_duration_ms: runDurationMs,
+    upgrades_picked: upgrades || [],
+    challenge_week: challengeWeek || null
+  };
+  if (isOffline()) {
+    writePending([...readPending(), row]);
+    return { success: false, reason: 'queued' };
+  }
+  const result = await insertScore(row);
+  if (result.reason === 'network') {
+    writePending([...readPending(), row]);
+    return { success: false, reason: 'queued' };
+  }
+  return result;
+}
 
+async function insertScore(row) {
   try {
-    const { error } = await supabase.from('scores').insert({
-      user_id: userId,
-      anon_id: getAnonId(),
-      display_name: displayName,
-      wave,
-      score,
-      best_combo: bestCombo,
-      cores,
-      run_duration_ms: runDurationMs,
-      upgrades_picked: upgrades || [],
-      challenge_week: challengeWeek || null
-    });
+    const { error } = await supabase.from('scores').insert(row);
     if (error) {
+      // A dropped connection comes back as an error with no database code.
+      if (!error.code) return { success: false, reason: 'network' };
       console.warn('Score submission failed:', error);
       return { success: false, reason: 'db_error' };
     }
     return { success: true };
   } catch (e) {
-    console.warn('Score submission threw:', e);
     return { success: false, reason: 'network' };
   }
 }
 
+// Send runs saved while offline. Returns how many went up.
+let flushing = false;
+export async function flushPendingScores() {
+  if (!online || isOffline() || flushing) return 0;
+  const pending = readPending();
+  if (pending.length === 0) return 0;
+  flushing = true;
+  let sent = 0;
+  const left = [];
+  for (const row of pending) {
+    const result = left.length ? { reason: 'network' } : await insertScore(row);
+    if (result.success) sent++;
+    else if (result.reason === 'network') left.push(row);
+    // db_error: the database refused this row; retrying won't change that.
+  }
+  writePending(left);
+  flushing = false;
+  return sent;
+}
+
 // ---- Top N global scores ----
 export async function fetchLeaderboard(limit = 20) {
-  if (!online) return [];
+  if (!online || isOffline()) return [];
   try {
     const { data, error } = await supabase
       .from('scores')
@@ -108,7 +154,7 @@ export async function fetchLeaderboard(limit = 20) {
 // Signed-in: union of scores attributed to user_id OR to this device's anon_id
 // (so pre-signin runs still count). Anon: just this device.
 export async function fetchMyBest() {
-  if (!online) return null;
+  if (!online || isOffline()) return null;
   const userId = getSession()?.user?.id;
   const anonId = getAnonId();
   try {
@@ -132,7 +178,7 @@ export async function fetchMyBest() {
 
 // ---- Global aggregates for title screen ----
 export async function fetchGlobalStats() {
-  if (!online) return null;
+  if (!online || isOffline()) return null;
   try {
     const { data, error } = await supabase
       .from('global_stats_view')

@@ -9,6 +9,13 @@ const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 export let supabase = null;
 export let online = false;
 
+// True when the device reports no network (airplane mode, no signal). The
+// browser and the iOS web view both keep navigator.onLine up to date, so
+// online-only features can answer at once instead of waiting on retries.
+export function isOffline() {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
 if (SUPABASE_URL && SUPABASE_ANON_KEY) {
   try {
     supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
